@@ -54,6 +54,7 @@ SQL_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN", "TIMESTAMP"}
 
 CLAUDE_MODEL = "claude-3-haiku-20240307"
 AI_SAMPLE_ROW_LIMIT = 3
+QUERY_HISTORY_LIMIT = 100
 GUI_LOG_FILE = "tinydb_gui.log"
 GUI_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".tinydb_gui_config.json")
 
@@ -155,6 +156,13 @@ class TinyDBGui:
         self.db_path_var = tk.StringVar(value=db_path or configured_db_path)
         self.claude_api_key_var = tk.StringVar(value=str(self._config.get("api_key", "") or ""))
         self.claude_model_var = tk.StringVar(value=str(self._config.get("model", CLAUDE_MODEL) or CLAUDE_MODEL))
+        saved_history = self._config.get("sql_history", [])
+        self.query_history: list[str] = [str(item) for item in saved_history if isinstance(item, str)]
+        saved_snippets = self._config.get("sql_snippets", [])
+        self.query_snippets: list[str] = [str(item) for item in saved_snippets if isinstance(item, str)]
+        self.history_expanded_var = tk.BooleanVar(value=False)
+        self.snippets_expanded_var = tk.BooleanVar(value=False)
+        self.ai_expanded_var = tk.BooleanVar(value=False)
         self.autocomplete_popup: tk.Toplevel | None = None
         self.autocomplete_list: tk.Listbox | None = None
         self.ai_request_inflight = False
@@ -188,6 +196,8 @@ class TinyDBGui:
             "api_key": self.claude_api_key_var.get().strip(),
             "model": self.claude_model_var.get().strip() or CLAUDE_MODEL,
             "last_db_path": self.db_path_var.get().strip(),
+            "sql_history": self.query_history[:QUERY_HISTORY_LIMIT],
+            "sql_snippets": self.query_snippets[:QUERY_HISTORY_LIMIT],
         }
         try:
             with open(GUI_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -200,6 +210,113 @@ class TinyDBGui:
 
     def _on_model_changed(self, *_args: Any) -> None:
         self._save_config()
+
+    def _refresh_history_list(self) -> None:
+        self.history_list.delete(0, tk.END)
+        for sql in self.query_history[:QUERY_HISTORY_LIMIT]:
+            self.history_list.insert(tk.END, sql)
+
+    def _toggle_history_visibility(self) -> None:
+        if self.history_expanded_var.get():
+            self.history_body.pack(fill=tk.X, padx=8, pady=(4, 6))
+        else:
+            self.history_body.pack_forget()
+
+    def _record_query_history(self, sql: str) -> None:
+        cleaned = sql.strip()
+        if not cleaned:
+            return
+        self.query_history = [item for item in self.query_history if item != cleaned]
+        self.query_history.insert(0, cleaned)
+        self.query_history = self.query_history[:QUERY_HISTORY_LIMIT]
+        self._refresh_history_list()
+        self._save_config()
+
+    def _selected_history_sql(self) -> str | None:
+        selection = self.history_list.curselection()
+        if not selection:
+            return None
+        return str(self.history_list.get(selection[0]))
+
+    def _use_selected_history(self) -> None:
+        sql = self._selected_history_sql()
+        if sql is None:
+            messagebox.showinfo("SQL History", "Select a history entry first.")
+            return
+        self._set_query_text(sql)
+
+    def _run_selected_history(self) -> None:
+        sql = self._selected_history_sql()
+        if sql is None:
+            messagebox.showinfo("SQL History", "Select a history entry first.")
+            return
+        self._set_query_text(sql)
+        self._execute_sql_text(sql)
+
+    def _on_history_double_click(self, _event: Any) -> None:
+        self._use_selected_history()
+
+    def _refresh_snippet_list(self) -> None:
+        self.snippet_list.delete(0, tk.END)
+        for sql in self.query_snippets[:QUERY_HISTORY_LIMIT]:
+            self.snippet_list.insert(tk.END, sql)
+
+    def _toggle_snippets_visibility(self) -> None:
+        if self.snippets_expanded_var.get():
+            self.snippet_body.pack(fill=tk.X, padx=8, pady=(4, 6))
+        else:
+            self.snippet_body.pack_forget()
+
+    def _toggle_ai_visibility(self) -> None:
+        if self.ai_expanded_var.get():
+            self.ai_body.pack(fill=tk.X, padx=8, pady=(4, 6))
+        else:
+            self.ai_body.pack_forget()
+
+    def _selected_snippet_sql(self) -> str | None:
+        selection = self.snippet_list.curselection()
+        if not selection:
+            return None
+        return str(self.snippet_list.get(selection[0]))
+
+    def _save_current_snippet(self) -> None:
+        sql = self.query_entry.get("1.0", tk.END).strip()
+        if not sql:
+            messagebox.showinfo("Saved SQL Snippets", "Enter SQL in the editor first.")
+            return
+        self.query_snippets = [item for item in self.query_snippets if item != sql]
+        self.query_snippets.insert(0, sql)
+        self.query_snippets = self.query_snippets[:QUERY_HISTORY_LIMIT]
+        self._refresh_snippet_list()
+        self._save_config()
+        self._print_output("Saved SQL snippet.", level="INFO")
+
+    def _use_selected_snippet(self) -> None:
+        sql = self._selected_snippet_sql()
+        if sql is None:
+            messagebox.showinfo("Saved SQL Snippets", "Select a snippet first.")
+            return
+        self._set_query_text(sql)
+
+    def _run_selected_snippet(self) -> None:
+        sql = self._selected_snippet_sql()
+        if sql is None:
+            messagebox.showinfo("Saved SQL Snippets", "Select a snippet first.")
+            return
+        self._set_query_text(sql)
+        self._execute_sql_text(sql)
+
+    def _delete_selected_snippet(self) -> None:
+        sql = self._selected_snippet_sql()
+        if sql is None:
+            messagebox.showinfo("Saved SQL Snippets", "Select a snippet first.")
+            return
+        self.query_snippets = [item for item in self.query_snippets if item != sql]
+        self._refresh_snippet_list()
+        self._save_config()
+
+    def _on_snippet_double_click(self, _event: Any) -> None:
+        self._use_selected_snippet()
 
     def _build_logger(self) -> logging.Logger:
         logger = logging.getLogger("tinydb_engine.gui")
@@ -293,11 +410,71 @@ class TinyDBGui:
         ttk.Button(btns, text="Run SQL", command=self.run_sql).pack(side=tk.LEFT)
         ttk.Button(btns, text="Refresh Metadata", command=self.refresh_metadata).pack(side=tk.LEFT, padx=6)
 
+        history_frame = ttk.LabelFrame(query_frame, text="SQL History")
+        history_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Checkbutton(
+            history_frame,
+            text="Show history",
+            variable=self.history_expanded_var,
+            command=self._toggle_history_visibility,
+        ).pack(anchor=tk.W, padx=8, pady=(6, 0))
+
+        self.history_body = ttk.Frame(history_frame)
+        self.history_body.pack(fill=tk.X, padx=8, pady=(4, 6))
+
+        self.history_list = tk.Listbox(self.history_body, height=4)
+        self.history_list.pack(fill=tk.X, pady=(0, 4))
+        self.history_list.configure(bg="#ffffff", relief=tk.FLAT, highlightthickness=1, highlightbackground="#d7dce3")
+        self.history_list.bind("<Double-Button-1>", self._on_history_double_click)
+
+        history_btns = ttk.Frame(self.history_body)
+        history_btns.pack(fill=tk.X)
+        ttk.Button(history_btns, text="Use Selected", command=self._use_selected_history).pack(side=tk.LEFT)
+        ttk.Button(history_btns, text="Run Selected", command=self._run_selected_history).pack(side=tk.LEFT, padx=6)
+        self._refresh_history_list()
+        self._toggle_history_visibility()
+
+        snippet_frame = ttk.LabelFrame(query_frame, text="Saved SQL Snippets")
+        snippet_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Checkbutton(
+            snippet_frame,
+            text="Show snippets",
+            variable=self.snippets_expanded_var,
+            command=self._toggle_snippets_visibility,
+        ).pack(anchor=tk.W, padx=8, pady=(6, 0))
+
+        self.snippet_body = ttk.Frame(snippet_frame)
+        self.snippet_body.pack(fill=tk.X, padx=8, pady=(4, 6))
+
+        self.snippet_list = tk.Listbox(self.snippet_body, height=4)
+        self.snippet_list.pack(fill=tk.X, pady=(0, 4))
+        self.snippet_list.configure(bg="#ffffff", relief=tk.FLAT, highlightthickness=1, highlightbackground="#d7dce3")
+        self.snippet_list.bind("<Double-Button-1>", self._on_snippet_double_click)
+
+        snippet_btns = ttk.Frame(self.snippet_body)
+        snippet_btns.pack(fill=tk.X)
+        ttk.Button(snippet_btns, text="Save Current", command=self._save_current_snippet).pack(side=tk.LEFT)
+        ttk.Button(snippet_btns, text="Use Selected", command=self._use_selected_snippet).pack(side=tk.LEFT, padx=6)
+        ttk.Button(snippet_btns, text="Run Selected", command=self._run_selected_snippet).pack(side=tk.LEFT)
+        ttk.Button(snippet_btns, text="Delete Selected", command=self._delete_selected_snippet).pack(side=tk.LEFT, padx=6)
+        self._refresh_snippet_list()
+        self._toggle_snippets_visibility()
+
         ai_frame = ttk.LabelFrame(query_frame, text="AI Assistant (Claude)")
         ai_frame.pack(fill=tk.X, pady=(2, 8))
 
-        model_row = ttk.Frame(ai_frame)
-        model_row.pack(fill=tk.X, padx=8, pady=(6, 4))
+        ttk.Checkbutton(
+            ai_frame,
+            text="Show AI Assistant",
+            variable=self.ai_expanded_var,
+            command=self._toggle_ai_visibility,
+        ).pack(anchor=tk.W, padx=8, pady=(6, 0))
+
+        self.ai_body = ttk.Frame(ai_frame)
+        self.ai_body.pack(fill=tk.X, padx=8, pady=(4, 6))
+
+        model_row = ttk.Frame(self.ai_body)
+        model_row.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(model_row, text="Model:").pack(side=tk.LEFT)
         ttk.Entry(model_row, textvariable=self.claude_model_var).pack(
             side=tk.LEFT,
@@ -306,8 +483,8 @@ class TinyDBGui:
             padx=(6, 0),
         )
 
-        key_row = ttk.Frame(ai_frame)
-        key_row.pack(fill=tk.X, padx=8, pady=(0, 4))
+        key_row = ttk.Frame(self.ai_body)
+        key_row.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(key_row, text="API Key:").pack(side=tk.LEFT)
         ttk.Entry(key_row, textvariable=self.claude_api_key_var, show="*").pack(
             side=tk.LEFT,
@@ -316,17 +493,18 @@ class TinyDBGui:
             padx=(6, 0),
         )
 
-        self.ai_prompt_entry = tk.Text(ai_frame, height=3, wrap=tk.WORD)
-        self.ai_prompt_entry.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self.ai_prompt_entry = tk.Text(self.ai_body, height=3, wrap=tk.WORD)
+        self.ai_prompt_entry.pack(fill=tk.X, pady=(0, 4))
         self.ai_prompt_entry.configure(bg="#ffffff", relief=tk.FLAT, padx=8, pady=6, font=("Segoe UI", 10))
         self.ai_prompt_entry.insert("1.0", "Show top 10 users by score")
 
-        ai_btns = ttk.Frame(ai_frame)
-        ai_btns.pack(fill=tk.X, padx=8, pady=(0, 6))
+        ai_btns = ttk.Frame(self.ai_body)
+        ai_btns.pack(fill=tk.X)
         self.ai_generate_btn = ttk.Button(ai_btns, text="Generate SQL (Safe)", command=self.ai_generate_sql)
         self.ai_generate_btn.pack(side=tk.LEFT)
         self.ai_run_btn = ttk.Button(ai_btns, text="Generate + Run", command=self.ai_generate_and_run)
         self.ai_run_btn.pack(side=tk.LEFT, padx=6)
+        self._toggle_ai_visibility()
 
         ttk.Label(query_frame, text="Results", style="Header.TLabel").pack(anchor=tk.W)
         results_wrap = ttk.Frame(query_frame)
@@ -832,6 +1010,7 @@ class TinyDBGui:
 
     def _execute_sql_text(self, sql: str) -> None:
         try:
+            self._record_query_history(sql)
             self._print_output(f"Running SQL: {sql}", level="INFO")
             result = self.db.execute(sql)
             if isinstance(result, list) and (not result or isinstance(result[0], dict)):
