@@ -700,6 +700,11 @@ class TinyDBGui:
             padx=6,
         )
         ttk.Button(controls, text="Delete Selected Row", command=lambda: delete_selected_row()).pack(side=tk.LEFT)
+        ttk.Label(controls, text="Filter:").pack(side=tk.LEFT, padx=(12, 4))
+        filter_var = tk.StringVar()
+        filter_entry = ttk.Entry(controls, textvariable=filter_var, width=24)
+        filter_entry.pack(side=tk.LEFT)
+        ttk.Button(controls, text="Clear", command=lambda: filter_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
 
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         y_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
@@ -707,20 +712,78 @@ class TinyDBGui:
         tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
         rows_by_item: dict[str, dict[str, Any]] = {}
+        all_rows: list[dict[str, Any]] = []
+        sort_column: str | None = None
+        sort_desc = False
         status_var = tk.StringVar(value="(0 rows)")
 
-        for col in columns:
-            tree.heading(col, text=col)
-            tree.column(col, width=140, anchor=tk.W, stretch=True)
+        def _sort_key(row: dict[str, Any], column: str) -> tuple[int, str]:
+            value = row.get(column)
+            if value is None:
+                return (1, "")
+            return (0, str(value).lower())
 
-        def reload_rows() -> None:
-            rows = self.db.execute(f"SELECT * FROM {table_name}")
+        def _refresh_headings() -> None:
+            for heading_col in columns:
+                marker = ""
+                if heading_col == sort_column:
+                    marker = " ▼" if sort_desc else " ▲"
+                tree.heading(
+                    heading_col,
+                    text=f"{heading_col}{marker}",
+                    command=lambda c=heading_col: on_sort(c),
+                )
+
+        def _render_rows(rows: list[dict[str, Any]]) -> None:
             rows_by_item.clear()
             tree.delete(*tree.get_children())
             for row in rows:
                 item_id = tree.insert("", tk.END, values=[_scalar(row.get(col)) for col in columns])
                 rows_by_item[item_id] = row
-            status_var.set(f"{len(rows)} row(s)")
+            if filter_var.get().strip():
+                status_var.set(f"{len(rows)} shown / {len(all_rows)} total")
+            else:
+                status_var.set(f"{len(rows)} row(s)")
+
+        def apply_filter_and_sort() -> None:
+            query = filter_var.get().strip().lower()
+            filtered_rows = all_rows
+            if query:
+                filtered_rows = [
+                    row
+                    for row in all_rows
+                    if any(query in str(row.get(col, "")).lower() for col in columns)
+                ]
+
+            if sort_column is not None:
+                filtered_rows = sorted(
+                    filtered_rows,
+                    key=lambda row: _sort_key(row, sort_column),
+                    reverse=sort_desc,
+                )
+            _render_rows(filtered_rows)
+
+        def on_sort(column: str) -> None:
+            nonlocal sort_column, sort_desc
+            if sort_column == column:
+                sort_desc = not sort_desc
+            else:
+                sort_column = column
+                sort_desc = False
+            _refresh_headings()
+            apply_filter_and_sort()
+
+        for col in columns:
+            tree.heading(col, text=col, command=lambda c=col: on_sort(c))
+            tree.column(col, width=140, anchor=tk.W, stretch=True)
+
+        def reload_rows() -> None:
+            nonlocal all_rows
+            all_rows = self.db.execute(f"SELECT * FROM {table_name}")
+            apply_filter_and_sort()
+
+        filter_var.trace_add("write", lambda *_: apply_filter_and_sort())
+        _refresh_headings()
 
         def edit_selected_row() -> None:
             selection = tree.selection()
