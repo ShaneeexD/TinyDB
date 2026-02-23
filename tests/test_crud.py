@@ -40,6 +40,24 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_timestamp_type_round_trip(tmp_path):
+    db_path = tmp_path / "crud_timestamp.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY, created_at TIMESTAMP NOT NULL, note TEXT)"
+        ) == "OK"
+
+        assert db.execute(
+            "INSERT INTO events VALUES (1, '2023-04-01 12:34:56', 'boot')"
+        ) == "OK"
+
+        rows = db.execute("SELECT created_at, note FROM events WHERE id = 1")
+        assert rows == [{"created_at": "2023-04-01 12:34:56", "note": "boot"}]
+    finally:
+        db.close()
+
+
 def test_multi_row_insert(tmp_path):
     db_path = tmp_path / "crud_multi_insert.db"
     db = TinyDB(str(db_path))

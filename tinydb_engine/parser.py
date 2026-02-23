@@ -20,7 +20,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>]|\bAND\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'[^']*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>]|\bAND\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bFOREIGN\b|\bREFERENCES\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'[^']*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -112,26 +112,39 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt:
     stream.expect("(")
 
     columns: List[ColumnDef] = []
+    foreign_keys: List[Tuple[str, str, str]] = []
     while True:
-        col_name = stream.pop()
-        col_type = stream.pop().upper()
-        primary_key = False
-        not_null = False
-        if stream.consume("PRIMARY"):
+        if stream.consume("FOREIGN"):
             stream.expect("KEY")
-            primary_key = True
-            not_null = True
-        if stream.consume("NOT"):
-            stream.expect("NULL")
-            not_null = True
-        columns.append(
-            ColumnDef(
-                name=col_name,
-                data_type=col_type,
-                primary_key=primary_key,
-                not_null=not_null,
+            stream.expect("(")
+            local_column = stream.pop()
+            stream.expect(")")
+            stream.expect("REFERENCES")
+            ref_table = stream.pop()
+            stream.expect("(")
+            ref_column = stream.pop()
+            stream.expect(")")
+            foreign_keys.append((local_column, ref_table, ref_column))
+        else:
+            col_name = stream.pop()
+            col_type = stream.pop().upper()
+            primary_key = False
+            not_null = False
+            if stream.consume("PRIMARY"):
+                stream.expect("KEY")
+                primary_key = True
+                not_null = True
+            if stream.consume("NOT"):
+                stream.expect("NULL")
+                not_null = True
+            columns.append(
+                ColumnDef(
+                    name=col_name,
+                    data_type=col_type,
+                    primary_key=primary_key,
+                    not_null=not_null,
+                )
             )
-        )
 
         if stream.consume(","):
             continue
@@ -139,7 +152,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt:
         break
 
     _assert_consumed(stream)
-    return CreateTableStmt(table_name=table_name, columns=columns)
+    return CreateTableStmt(table_name=table_name, columns=columns, foreign_keys=foreign_keys)
 
 
 def _parse_insert(stream: TokenStream) -> InsertStmt:

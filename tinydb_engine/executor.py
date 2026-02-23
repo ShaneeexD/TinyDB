@@ -75,6 +75,25 @@ class Executor:
         if pk_count > 1:
             raise ValueError("Only one PRIMARY KEY is supported")
 
+        foreign_keys: List[dict[str, str]] = []
+        for local_column, ref_table, ref_column in stmt.foreign_keys:
+            if not any(col.name.lower() == local_column.lower() for col in columns):
+                raise ValueError(f"Unknown column '{local_column}' in FOREIGN KEY")
+
+            ref_schema = self.schemas.get(ref_table.lower())
+            if ref_schema is None:
+                raise ValueError(f"Unknown referenced table: {ref_table}")
+            if not any(col.name.lower() == ref_column.lower() for col in ref_schema.columns):
+                raise ValueError(f"Unknown referenced column: {ref_table}.{ref_column}")
+
+            foreign_keys.append(
+                {
+                    "column": local_column,
+                    "ref_table": ref_table,
+                    "ref_column": ref_column,
+                }
+            )
+
         index = BTreeIndex.create(self.pager)
         data_page = self._new_table_page()
         schema = TableSchema(
@@ -82,6 +101,7 @@ class Executor:
             columns=columns,
             data_page_ids=[data_page],
             pk_index_root_page=index.root_page_id,
+            foreign_keys=foreign_keys,
         )
         self.schemas[key] = schema
         self.catalog.save(self.schemas)
@@ -177,6 +197,8 @@ class Executor:
                 if btree.find(pk_val) is not None:
                     raise ValueError("Duplicate primary key")
 
+            self._validate_foreign_keys(schema, values)
+
             page_id, slot_id = self._insert_row(schema, values)
             if pk_idx is not None and btree is not None:
                 btree.insert(values[pk_idx], (page_id, slot_id))
@@ -266,6 +288,8 @@ class Executor:
                 if new_pk != old_pk and btree and btree.find(new_pk) is not None:
                     raise ValueError("Duplicate primary key")
 
+            self._validate_foreign_keys(schema, new_values)
+
             page = self.pager.read_page(row["page_id"])
             page_obj = self._read_table_page(page)
             page_obj["slots"][row["slot_id"]]["deleted"] = True
@@ -282,6 +306,37 @@ class Executor:
             self.catalog.save(self.schemas)
         return affected
 
+    def _validate_foreign_keys(self, schema: TableSchema, values: List[Any]) -> None:
+        for fk in schema.foreign_keys or []:
+            local_idx = schema.column_index(fk["column"])
+            local_value = values[local_idx]
+            if local_value is None:
+                continue
+
+            ref_schema = self._schema(fk["ref_table"])
+            ref_idx = ref_schema.column_index(fk["ref_column"])
+            if not any(row["values"][ref_idx] == local_value for row in self._scan_rows(ref_schema)):
+                raise ValueError(
+                    f"FOREIGN KEY constraint failed: {schema.name}.{fk['column']} references "
+                    f"{ref_schema.name}.{fk['ref_column']}"
+                )
+
+    def _assert_not_referenced(self, schema: TableSchema, row_values: List[Any]) -> None:
+        for child_schema in self.schemas.values():
+            for fk in child_schema.foreign_keys or []:
+                if fk["ref_table"].lower() != schema.name.lower():
+                    continue
+
+                ref_idx = schema.column_index(fk["ref_column"])
+                parent_value = row_values[ref_idx]
+                child_idx = child_schema.column_index(fk["column"])
+                for child_row in self._scan_rows(child_schema):
+                    if child_row["values"][child_idx] == parent_value:
+                        raise ValueError(
+                            f"FOREIGN KEY constraint failed: row is referenced by "
+                            f"{child_schema.name}.{fk['column']}"
+                        )
+
     def _delete(self, stmt: DeleteStmt) -> int:
         schema = self._schema(stmt.table_name)
         rows = self._scan_rows(schema)
@@ -293,6 +348,7 @@ class Executor:
         for row in rows:
             if stmt.where and not self._matches_where(schema, row["values"], stmt.where):
                 continue
+            self._assert_not_referenced(schema, row["values"])
             page = self.pager.read_page(row["page_id"])
             page_obj = self._read_table_page(page)
             page_obj["slots"][row["slot_id"]]["deleted"] = True

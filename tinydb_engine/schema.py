@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
-SUPPORTED_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN"}
+SUPPORTED_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN", "TIMESTAMP"}
 
 
 @dataclass
@@ -21,6 +21,7 @@ class TableSchema:
     columns: List[ColumnSchema]
     data_page_ids: List[int]
     pk_index_root_page: int
+    foreign_keys: List[dict[str, str]] | None = None
 
     @property
     def pk_column(self) -> Optional[ColumnSchema]:
@@ -54,6 +55,8 @@ def coerce_value(value: Any, data_type: str) -> Any:
         return float(value)
     if data_type == "TEXT":
         return str(value)
+    if data_type == "TIMESTAMP":
+        return str(value)
     if data_type == "BOOLEAN":
         if isinstance(value, bool):
             return value
@@ -83,6 +86,7 @@ def serialize_schema_map(schema_map: Dict[str, TableSchema]) -> Dict[str, Any]:
             ],
             "data_page_ids": schema.data_page_ids,
             "pk_index_root_page": schema.pk_index_root_page,
+            "foreign_keys": list(schema.foreign_keys or []),
         }
         for name, schema in schema_map.items()
     }
@@ -96,5 +100,6 @@ def deserialize_schema_map(payload: Dict[str, Any]) -> Dict[str, TableSchema]:
             columns=[ColumnSchema(**col) for col in table["columns"]],
             data_page_ids=list(table["data_page_ids"]),
             pk_index_root_page=int(table["pk_index_root_page"]),
+            foreign_keys=[dict(item) for item in table.get("foreign_keys", [])],
         )
     return output

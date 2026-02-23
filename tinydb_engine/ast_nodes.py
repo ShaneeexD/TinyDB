@@ -22,6 +22,7 @@ class WhereClause:
 class CreateTableStmt:
     table_name: str
     columns: Sequence[ColumnDef]
+    foreign_keys: Sequence[Tuple[str, str, str]]
 
 
 @dataclass(frozen=True)

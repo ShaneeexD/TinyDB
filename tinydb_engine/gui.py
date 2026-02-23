@@ -50,7 +50,7 @@ SQL_KEYWORDS = {
     "WHERE",
 }
 
-SQL_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN"}
+SQL_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN", "TIMESTAMP"}
 
 CLAUDE_MODEL = "claude-3-haiku-20240307"
 AI_SAMPLE_ROW_LIMIT = 3
@@ -62,6 +62,7 @@ CLAUDE_SYSTEM_PROMPT = """You are an assistant that writes SQL for tinydb_engine
 Return exactly one SQL statement and nothing else (no markdown, no prose, no code fences).
 Use only syntax supported by tinydb_engine:
 - CREATE TABLE
+- FOREIGN KEY (col) REFERENCES other_table(other_col) inside CREATE TABLE
 - INSERT INTO ... VALUES (...) or INSERT INTO ... VALUES (...), (...)
 - SELECT ... [WHERE] [ORDER BY] [LIMIT]
 - UPDATE ... SET ... [WHERE]
@@ -73,6 +74,8 @@ Use only syntax supported by tinydb_engine:
 - ALTER TABLE ... REMOVE COLUMN ...
 
 Important limitations:
+- Available SQL column types: INTEGER, TEXT, REAL, BOOLEAN, TIMESTAMP.
+- TIMESTAMP values should be string literals (example: '2023-04-01 12:34:56').
 - WHERE supports AND-combined predicates only.
 - ALTER TABLE ADD COLUMN supports nullable non-PK columns only.
 - ALTER TABLE REMOVE COLUMN supports only removing the last non-PK column.
