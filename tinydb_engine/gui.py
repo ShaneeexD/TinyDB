@@ -354,6 +354,7 @@ class TinyDBGui:
 
         ttk.Label(top, text="DB File:").pack(side=tk.LEFT)
         ttk.Entry(top, textvariable=self.db_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        ttk.Button(top, text="New DB", command=self._create_new_db).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="Browse", command=self._browse).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="Open", command=lambda: self.open_db(self.db_path_var.get())).pack(side=tk.LEFT)
 
@@ -538,6 +539,16 @@ class TinyDBGui:
             self.db_path_var.set(path)
             self.open_db(path)
 
+    def _create_new_db(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Create TinyDB file",
+            defaultextension=".db",
+            filetypes=[("TinyDB", "*.db"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.open_db(path)
+
     def open_db(self, path: str) -> None:
         if not path:
             return
@@ -683,10 +694,12 @@ class TinyDBGui:
         controls = ttk.Frame(frame)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(controls, text="Refresh", command=lambda: reload_rows()).pack(side=tk.LEFT)
+        ttk.Button(controls, text="Add Row", command=lambda: add_row()).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="Edit Selected Row", command=lambda: edit_selected_row()).pack(
             side=tk.LEFT,
             padx=6,
         )
+        ttk.Button(controls, text="Delete Selected Row", command=lambda: delete_selected_row()).pack(side=tk.LEFT)
 
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         y_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
@@ -779,6 +792,99 @@ class TinyDBGui:
             actions.grid(row=len(schema.columns), column=0, columnspan=2, sticky="e", pady=(10, 0))
             ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
             ttk.Button(actions, text="Save", command=save).pack(side=tk.RIGHT, padx=(0, 6))
+
+        def add_row() -> None:
+            dialog = tk.Toplevel(window)
+            dialog.title(f"Add Row - {table_name}")
+            dialog.geometry("460x420")
+            dialog.transient(window)
+            dialog.grab_set()
+
+            body = ttk.Frame(dialog, padding=10)
+            body.pack(fill=tk.BOTH, expand=True)
+
+            entries: dict[str, tk.Entry] = {}
+            for row_idx, col in enumerate(schema.columns):
+                ttk.Label(body, text=f"{col.name} ({col.data_type})").grid(
+                    row=row_idx,
+                    column=0,
+                    sticky="w",
+                    padx=(0, 8),
+                    pady=4,
+                )
+                entry = ttk.Entry(body)
+                entry.grid(row=row_idx, column=1, sticky="ew", pady=4)
+                entries[col.name] = entry
+
+            body.columnconfigure(1, weight=1)
+
+            pk_col = schema.pk_column
+            if pk_col is not None and pk_col.data_type == "INTEGER":
+                try:
+                    current_rows = self.db.execute(f"SELECT * FROM {table_name}")
+                    max_pk = max(
+                        (int(row.get(pk_col.name)) for row in current_rows if row.get(pk_col.name) is not None),
+                        default=0,
+                    )
+                    entries[pk_col.name].insert(0, str(max_pk + 1))
+                except Exception:
+                    pass
+
+            def save_new() -> None:
+                try:
+                    ordered_values: list[str] = []
+                    for col in schema.columns:
+                        raw_text = entries[col.name].get().strip()
+                        if raw_text == "":
+                            typed_value = None
+                        else:
+                            typed_value = _parse_editor_value(col.data_type, raw_text)
+                        ordered_values.append(_to_sql_literal(typed_value))
+
+                    sql = f"INSERT INTO {table_name} VALUES ({', '.join(ordered_values)})"
+                    self.db.execute(sql)
+                    reload_rows()
+                    self.refresh_metadata()
+                    dialog.destroy()
+                except Exception as exc:
+                    messagebox.showerror("Add Row Failed", str(exc), parent=dialog)
+
+            actions = ttk.Frame(body)
+            actions.grid(row=len(schema.columns), column=0, columnspan=2, sticky="e", pady=(10, 0))
+            ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+            ttk.Button(actions, text="Insert", command=save_new).pack(side=tk.RIGHT, padx=(0, 6))
+
+        def delete_selected_row() -> None:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo("Delete Row", "Select a row first.")
+                return
+
+            pk_col = schema.pk_column
+            if pk_col is None:
+                messagebox.showwarning("Delete Row", "Deleting requires a PRIMARY KEY table.")
+                return
+
+            item_id = selection[0]
+            original = rows_by_item.get(item_id)
+            if original is None:
+                return
+
+            should_delete = messagebox.askyesno(
+                "Delete Row",
+                f"Delete selected row where {pk_col.name} = {original.get(pk_col.name)}?",
+                parent=window,
+            )
+            if not should_delete:
+                return
+
+            try:
+                pk_value = _to_sql_literal(original.get(pk_col.name))
+                self.db.execute(f"DELETE FROM {table_name} WHERE {pk_col.name} = {pk_value}")
+                reload_rows()
+                self.refresh_metadata()
+            except Exception as exc:
+                messagebox.showerror("Delete Row Failed", str(exc), parent=window)
 
         reload_rows()
 
