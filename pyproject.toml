@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinydb_engine"
+version = "0.1.0"
+description = "A tiny embedded page-based database engine"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+tinydb = "tinydb_engine.repl:main"
+tinydb-gui = "tinydb_engine.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tinydb_engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
