@@ -85,6 +85,16 @@ Important limitations:
 Generate practical SQL using available schema context.
 """
 
+CLAUDE_EXPLAIN_PROMPT = """You explain SQL for tinydb_engine.
+
+Be concise and actionable.
+Return plain text (no markdown).
+Include:
+1) What this SQL does.
+2) Expected effect/result.
+3) Potential risks (especially data changes).
+"""
+
 
 def _scalar(value: Any) -> str:
     if value is None:
@@ -385,6 +395,17 @@ class TinyDBGui:
         self.schema_text.configure(bg="#ffffff", relief=tk.FLAT, padx=8, pady=6)
         self.schema_text.configure(state=tk.DISABLED)
 
+        schema_actions = ttk.Frame(left)
+        schema_actions.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(schema_actions, text="Add Table", command=self._add_table_selected_db).pack(side=tk.LEFT)
+        ttk.Button(schema_actions, text="Add Column", command=self._add_column_selected_table).pack(side=tk.LEFT)
+        ttk.Button(schema_actions, text="Remove Last", command=self._remove_last_column_selected_table).pack(
+            side=tk.LEFT,
+            padx=4,
+        )
+        ttk.Button(schema_actions, text="Rename Column", command=self._rename_column_selected_table).pack(side=tk.LEFT)
+        ttk.Button(schema_actions, text="Drop Table", command=self._drop_selected_table).pack(side=tk.RIGHT)
+
         query_frame = ttk.Frame(right)
         query_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -505,6 +526,8 @@ class TinyDBGui:
         self.ai_generate_btn.pack(side=tk.LEFT)
         self.ai_run_btn = ttk.Button(ai_btns, text="Generate + Run", command=self.ai_generate_and_run)
         self.ai_run_btn.pack(side=tk.LEFT, padx=6)
+        self.ai_explain_btn = ttk.Button(ai_btns, text="Explain This SQL", command=self.ai_explain_sql)
+        self.ai_explain_btn.pack(side=tk.LEFT)
         self._toggle_ai_visibility()
 
         ttk.Label(query_frame, text="Results", style="Header.TLabel").pack(anchor=tk.W)
@@ -655,6 +678,201 @@ class TinyDBGui:
         except Exception as exc:
             self._log_exception("Rename table failed", exc)
             messagebox.showerror("Rename Table Failed", str(exc))
+
+    def _add_table_selected_db(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Add Table", "Open a database first.")
+            return
+
+        table_name = simpledialog.askstring("Add Table", "Table name:", parent=self.root)
+        if table_name is None:
+            return
+        clean_table = table_name.strip()
+        if not clean_table or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", clean_table):
+            messagebox.showerror("Add Table", "Table name must be a valid identifier.")
+            return
+
+        columns_def = simpledialog.askstring(
+            "Add Table",
+            "Columns definition (inside CREATE TABLE parentheses).\n"
+            "Example: id INTEGER PRIMARY KEY, name TEXT NOT NULL",
+            initialvalue="id INTEGER PRIMARY KEY",
+            parent=self.root,
+        )
+        if columns_def is None:
+            return
+        clean_columns = columns_def.strip()
+        if not clean_columns:
+            messagebox.showerror("Add Table", "Columns definition cannot be empty.")
+            return
+
+        try:
+            self.db.execute(f"CREATE TABLE {clean_table} ({clean_columns})")
+            self.refresh_metadata()
+            self._select_table(clean_table)
+            self._print_output(f"Created table '{clean_table}'", level="INFO")
+        except Exception as exc:
+            self._log_exception("Add table failed", exc)
+            messagebox.showerror("Add Table Failed", str(exc))
+
+    def _add_column_selected_table(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Add Column", "Open a database first.")
+            return
+
+        table_name = self._selected_table_name()
+        if table_name is None:
+            messagebox.showinfo("Add Column", "Select a table first.")
+            return
+
+        col_name = simpledialog.askstring(
+            "Add Column",
+            "Column name:",
+            parent=self.root,
+        )
+        if col_name is None:
+            return
+        col_name = col_name.strip()
+        if not col_name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", col_name):
+            messagebox.showerror("Add Column", "Column name must be a valid identifier.")
+            return
+
+        col_type = simpledialog.askstring(
+            "Add Column",
+            "Column type (TEXT, INTEGER, FLOAT, BOOLEAN, TIMESTAMP):\n"
+            "Note: Added columns are nullable and cannot be PRIMARY KEY/NOT NULL.",
+            initialvalue="TEXT",
+            parent=self.root,
+        )
+        if col_type is None:
+            return
+        clean_type = col_type.strip().upper()
+        if clean_type not in {"TEXT", "INTEGER", "FLOAT", "BOOLEAN", "TIMESTAMP"}:
+            messagebox.showerror("Add Column", "Unsupported type.")
+            return
+
+        try:
+            self.db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {clean_type}")
+            self.refresh_metadata()
+            self._select_table(table_name)
+            self._print_output(f"Added column '{col_name}' to '{table_name}'", level="INFO")
+        except Exception as exc:
+            self._log_exception("Add column failed", exc)
+            messagebox.showerror("Add Column Failed", str(exc))
+
+    def _remove_last_column_selected_table(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Remove Column", "Open a database first.")
+            return
+
+        table_name = self._selected_table_name()
+        if table_name is None:
+            messagebox.showinfo("Remove Column", "Select a table first.")
+            return
+
+        schema = self.db.executor.schemas.get(table_name.lower())
+        if schema is None or not schema.columns:
+            messagebox.showerror("Remove Column", "Table schema is unavailable.")
+            return
+
+        last_col = schema.columns[-1]
+        if not messagebox.askyesno(
+            "Remove Last Column",
+            f"Remove last column '{last_col.name}' from '{table_name}'?\n\n"
+            "Engine rule: only the last non-primary-key column can be removed.",
+            parent=self.root,
+        ):
+            return
+
+        try:
+            self.db.execute(f"ALTER TABLE {table_name} REMOVE COLUMN {last_col.name}")
+            self.refresh_metadata()
+            self._select_table(table_name)
+            self._print_output(f"Removed column '{last_col.name}' from '{table_name}'", level="INFO")
+        except Exception as exc:
+            self._log_exception("Remove column failed", exc)
+            messagebox.showerror("Remove Column Failed", str(exc))
+
+    def _rename_column_selected_table(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Rename Column", "Open a database first.")
+            return
+
+        table_name = self._selected_table_name()
+        if table_name is None:
+            messagebox.showinfo("Rename Column", "Select a table first.")
+            return
+
+        schema = self.db.executor.schemas.get(table_name.lower())
+        if schema is None or not schema.columns:
+            messagebox.showerror("Rename Column", "Table schema is unavailable.")
+            return
+
+        current_names = ", ".join(col.name for col in schema.columns)
+        old_name = simpledialog.askstring(
+            "Rename Column",
+            f"Current columns: {current_names}\n\nColumn to rename:",
+            parent=self.root,
+        )
+        if old_name is None:
+            return
+        old_name = old_name.strip()
+        if not old_name:
+            messagebox.showerror("Rename Column", "Column name cannot be empty.")
+            return
+
+        new_name = simpledialog.askstring("Rename Column", f"Rename '{old_name}' to:", parent=self.root)
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", new_name):
+            messagebox.showerror("Rename Column", "New name must be a valid identifier.")
+            return
+
+        try:
+            self.db.execute(f"ALTER TABLE {table_name} RENAME COLUMN {old_name} TO {new_name}")
+            self.refresh_metadata()
+            self._select_table(table_name)
+            self._print_output(f"Renamed column '{old_name}' to '{new_name}' on '{table_name}'", level="INFO")
+        except Exception as exc:
+            self._log_exception("Rename column failed", exc)
+            messagebox.showerror("Rename Column Failed", str(exc))
+
+    def _drop_selected_table(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Drop Table", "Open a database first.")
+            return
+
+        table_name = self._selected_table_name()
+        if table_name is None:
+            messagebox.showinfo("Drop Table", "Select a table first.")
+            return
+
+        confirm = simpledialog.askstring(
+            "Drop Table",
+            f"Type the table name to confirm drop:\n{table_name}",
+            parent=self.root,
+        )
+        if confirm is None:
+            return
+        if confirm.strip() != table_name:
+            messagebox.showwarning("Drop Table", "Confirmation text did not match table name.")
+            return
+
+        if not messagebox.askyesno(
+            "Drop Table",
+            f"This permanently removes table '{table_name}'. Continue?",
+            parent=self.root,
+        ):
+            return
+
+        try:
+            self.db.execute(f"DROP TABLE {table_name}")
+            self.refresh_metadata()
+            self._print_output(f"Dropped table '{table_name}'", level="WARN")
+        except Exception as exc:
+            self._log_exception("Drop table failed", exc)
+            messagebox.showerror("Drop Table Failed", str(exc))
 
     def _selected_table_name(self) -> str | None:
         selection = self.table_list.curselection()
@@ -976,6 +1194,50 @@ class TinyDBGui:
     def ai_generate_and_run(self) -> None:
         self._start_ai_generation(run_after=True)
 
+    def ai_explain_sql(self) -> None:
+        if self.ai_request_inflight:
+            self._print_output("AI request already running. Please wait.", level="WARN")
+            return
+
+        if self.db is None:
+            messagebox.showwarning("AI Assistant", "Open a database first.")
+            return
+
+        api_key = self.claude_api_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("AI Assistant", "Enter your Claude API key first.")
+            return
+
+        sql = self.query_entry.get("1.0", tk.END).strip()
+        if not sql:
+            messagebox.showwarning("AI Assistant", "Enter SQL in SQL Console first.")
+            return
+
+        self.ai_request_inflight = True
+        self._set_ai_buttons_enabled(False)
+        self._print_output("Asking Claude to explain SQL...", level="INFO")
+
+        def worker() -> None:
+            try:
+                explanation = self._call_claude(
+                    prompt=f"Explain this SQL:\n{sql}",
+                    api_key=api_key,
+                    system_prompt=CLAUDE_EXPLAIN_PROMPT,
+                )
+                if not explanation:
+                    raise ValueError("Claude response did not include an explanation")
+                try:
+                    self.root.after(0, lambda: self._on_ai_explain_success(explanation))
+                except tk.TclError:
+                    return
+            except Exception as exc:
+                try:
+                    self.root.after(0, lambda err=exc: self._on_ai_failure(err))
+                except tk.TclError:
+                    return
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _start_ai_generation(self, run_after: bool) -> None:
         if self.ai_request_inflight:
             self._print_output("AI request already running. Please wait.", level="WARN")
@@ -1045,10 +1307,18 @@ class TinyDBGui:
         self._print_output(f"AI error: {exc}. See log file for details.", level="ERROR")
         messagebox.showerror("AI Generation Failed", str(exc))
 
+    def _on_ai_explain_success(self, explanation: str) -> None:
+        self.ai_request_inflight = False
+        self._set_ai_buttons_enabled(True)
+        self._print_output("AI SQL explanation:", level="INFO")
+        for line in explanation.splitlines() or [explanation]:
+            self._print_output(line, level="INFO")
+
     def _set_ai_buttons_enabled(self, enabled: bool) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
         self.ai_generate_btn.configure(state=state)
         self.ai_run_btn.configure(state=state)
+        self.ai_explain_btn.configure(state=state)
 
     def _generate_sql_from_ai_prompt(self) -> str | None:
         if self.db is None:
@@ -1078,7 +1348,7 @@ class TinyDBGui:
             self._print_output(f"AI error: {exc}. See log file for details.", level="ERROR")
             return None
 
-    def _call_claude(self, prompt: str, api_key: str) -> str:
+    def _call_claude(self, prompt: str, api_key: str, system_prompt: str = CLAUDE_SYSTEM_PROMPT) -> str:
         model_name = self.claude_model_var.get().strip() or CLAUDE_MODEL
 
         schema_lines: list[str] = []
@@ -1100,7 +1370,7 @@ class TinyDBGui:
         payload = {
             "model": model_name,
             "max_tokens": 400,
-            "system": CLAUDE_SYSTEM_PROMPT,
+            "system": system_prompt,
             "messages": [
                 {
                     "role": "user",
