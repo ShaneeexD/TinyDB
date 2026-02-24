@@ -24,27 +24,35 @@ SQL_KEYWORDS = {
     "ALTER",
     "AND",
     "ASC",
+    "BEGIN",
     "BY",
     "COLUMN",
+    "COMMIT",
     "CREATE",
     "DELETE",
+    "DESCRIBE",
     "DROP",
     "DESC",
     "FALSE",
     "FROM",
+    "IN",
     "INSERT",
     "INTO",
     "KEY",
     "LIMIT",
     "NOT",
     "NULL",
+    "OR",
     "ORDER",
     "PRIMARY",
     "REMOVE",
     "RENAME",
+    "ROLLBACK",
     "SELECT",
     "SET",
+    "SHOW",
     "TABLE",
+    "TABLES",
     "TO",
     "TRUE",
     "UPDATE",
@@ -164,10 +172,10 @@ class TinyDBGui:
         self.root.title("TinyDB Viewer")
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
-        default_w = max(980, min(1200, screen_w - 80))
-        default_h = max(700, min(820, screen_h - 120))
+        default_w = max(1080, min(1360, screen_w - 60))
+        default_h = max(760, min(900, screen_h - 80))
         self.root.geometry(f"{default_w}x{default_h}")
-        self.root.minsize(960, 680)
+        self.root.minsize(1040, 720)
         self.root.configure(bg="#f6f8fb")
 
         self._config = self._load_config()
@@ -412,15 +420,17 @@ class TinyDBGui:
 
         schema_actions = ttk.Frame(left)
         schema_actions.pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(schema_actions, text="Add Table", command=self._add_table_selected_db).pack(side=tk.LEFT)
-        ttk.Button(schema_actions, text="Add Column", command=self._add_column_selected_table).pack(side=tk.LEFT)
-        ttk.Button(schema_actions, text="Remove Last", command=self._remove_last_column_selected_table).pack(
-            side=tk.LEFT,
-            padx=4,
-        )
-        ttk.Button(schema_actions, text="Rename Column", command=self._rename_column_selected_table).pack(side=tk.LEFT)
-        ttk.Button(schema_actions, text="Describe", command=self._describe_selected_table).pack(side=tk.LEFT, padx=4)
-        ttk.Button(schema_actions, text="Drop Table", command=self._drop_selected_table).pack(side=tk.RIGHT)
+        schema_actions_row1 = ttk.Frame(schema_actions)
+        schema_actions_row1.pack(fill=tk.X)
+        ttk.Button(schema_actions_row1, text="Add Table", command=self._add_table_selected_db).pack(side=tk.LEFT)
+        ttk.Button(schema_actions_row1, text="Add Column", command=self._add_column_selected_table).pack(side=tk.LEFT, padx=4)
+        ttk.Button(schema_actions_row1, text="Remove Last", command=self._remove_last_column_selected_table).pack(side=tk.LEFT)
+
+        schema_actions_row2 = ttk.Frame(schema_actions)
+        schema_actions_row2.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(schema_actions_row2, text="Rename Column", command=self._rename_column_selected_table).pack(side=tk.LEFT)
+        ttk.Button(schema_actions_row2, text="Describe", command=self._describe_selected_table).pack(side=tk.LEFT, padx=4)
+        ttk.Button(schema_actions_row2, text="Drop Table", command=self._drop_selected_table).pack(side=tk.LEFT)
 
         query_frame = ttk.Frame(right)
         query_frame.pack(fill=tk.BOTH, expand=True)
