@@ -40,6 +40,29 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_where_or_and_in_support(tmp_path):
+    db_path = tmp_path / "crud_where_or_in.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL, active BOOLEAN)"
+        ) == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice', 9.5, TRUE)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Bob', 7.0, FALSE)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (3, 'Cara', 8.1, TRUE)") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE id = 1 OR id = 3 ORDER BY id ASC")
+        assert rows == [{"id": 1}, {"id": 3}]
+
+        rows = db.execute("SELECT id FROM users WHERE id IN (2, 3) ORDER BY id ASC")
+        assert rows == [{"id": 2}, {"id": 3}]
+
+        rows = db.execute("SELECT id FROM users WHERE active = TRUE AND id IN (1, 3) ORDER BY id ASC")
+        assert rows == [{"id": 1}, {"id": 3}]
+    finally:
+        db.close()
+
+
 def test_timestamp_type_round_trip(tmp_path):
     db_path = tmp_path / "crud_timestamp.db"
     db = TinyDB(str(db_path))

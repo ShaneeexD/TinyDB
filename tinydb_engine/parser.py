@@ -8,19 +8,24 @@ from .ast_nodes import (
     AlterTableRemoveColumnStmt,
     AlterTableRenameColumnStmt,
     AlterTableRenameStmt,
+    BeginStmt,
     ColumnDef,
+    CommitStmt,
     CreateTableStmt,
     DeleteStmt,
+    DescribeTableStmt,
     DropTableStmt,
     InsertStmt,
+    RollbackStmt,
     SelectStmt,
+    ShowTablesStmt,
     Statement,
     UpdateStmt,
     WhereClause,
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>]|\bAND\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bFOREIGN\b|\bREFERENCES\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'[^']*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>]|\bAND\b|\bOR\b|\bIN\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'[^']*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -102,6 +107,28 @@ def parse(sql: str) -> Statement:
         return _parse_drop(stream)
     if keyword == "ALTER":
         return _parse_alter(stream)
+    if keyword == "BEGIN":
+        stream.pop()
+        _assert_consumed(stream)
+        return BeginStmt()
+    if keyword == "COMMIT":
+        stream.pop()
+        _assert_consumed(stream)
+        return CommitStmt()
+    if keyword == "ROLLBACK":
+        stream.pop()
+        _assert_consumed(stream)
+        return RollbackStmt()
+    if keyword == "SHOW":
+        stream.pop()
+        stream.expect("TABLES")
+        _assert_consumed(stream)
+        return ShowTablesStmt()
+    if keyword == "DESCRIBE":
+        stream.pop()
+        table_name = stream.pop()
+        _assert_consumed(stream)
+        return DescribeTableStmt(table_name=table_name)
     raise ParseError(f"Unsupported command: {keyword}")
 
 
@@ -330,19 +357,38 @@ def _parse_where(stream: TokenStream) -> WhereClause | None:
     if not stream.consume("WHERE"):
         return None
 
-    predicates: List[Tuple[str, str, Any]] = []
+    groups: List[List[Tuple[str, str, Any]]] = []
+    current_group: List[Tuple[str, str, Any]] = []
     while True:
         col = stream.pop()
-        op = stream.pop()
-        if op not in {"=", "!=", "<", "<=", ">", ">="}:
-            raise ParseError(f"Unsupported operator: {op}")
-        value = _parse_literal(stream.pop())
-        predicates.append((col, op, value))
+        op = stream.pop().upper()
+
+        if op == "IN":
+            stream.expect("(")
+            values: List[Any] = []
+            while True:
+                values.append(_parse_literal(stream.pop()))
+                if stream.consume(","):
+                    continue
+                stream.expect(")")
+                break
+            current_group.append((col, "IN", values))
+        else:
+            if op not in {"=", "!=", "<", "<=", ">", ">="}:
+                raise ParseError(f"Unsupported operator: {op}")
+            value = _parse_literal(stream.pop())
+            current_group.append((col, op, value))
+
         if stream.consume("AND"):
+            continue
+        if stream.consume("OR"):
+            groups.append(current_group)
+            current_group = []
             continue
         break
 
-    return WhereClause(predicates=predicates)
+    groups.append(current_group)
+    return WhereClause(groups=groups)
 
 
 def _parse_literal(token: str) -> Any:

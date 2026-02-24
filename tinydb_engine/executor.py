@@ -8,11 +8,14 @@ from tinydb_engine.ast_nodes import (
     AlterTableRemoveColumnStmt,
     AlterTableRenameColumnStmt,
     AlterTableRenameStmt,
+    DescribeTableStmt,
     CreateTableStmt,
     DeleteStmt,
     DropTableStmt,
     InsertStmt,
+    RollbackStmt,
     SelectStmt,
+    ShowTablesStmt,
     Statement,
     UpdateStmt,
     WhereClause,
@@ -34,6 +37,10 @@ class Executor:
         self.schemas: Dict[str, TableSchema] = self.catalog.load()
 
     def execute(self, statement: Statement) -> Any:
+        if isinstance(statement, ShowTablesStmt):
+            return self._show_tables()
+        if isinstance(statement, DescribeTableStmt):
+            return self._describe_table(statement)
         if isinstance(statement, CreateTableStmt):
             return self._create_table(statement)
         if isinstance(statement, AlterTableRenameStmt):
@@ -55,6 +62,40 @@ class Executor:
         if isinstance(statement, DeleteStmt):
             return self._delete(statement)
         raise ValueError("Unsupported statement")
+
+    def _show_tables(self) -> List[Dict[str, Any]]:
+        names = sorted(table.name for table in self.schemas.values())
+        return [{"table_name": name} for name in names]
+
+    def _describe_table(self, stmt: DescribeTableStmt) -> List[Dict[str, Any]]:
+        schema = self._schema(stmt.table_name)
+        rows: List[Dict[str, Any]] = []
+        for fk in schema.foreign_keys or []:
+            key = fk["column"].lower()
+            rows.append(
+                {
+                    "name": fk["column"],
+                    "data_type": None,
+                    "primary_key": False,
+                    "not_null": False,
+                    "foreign_key": f"{fk['ref_table']}.{fk['ref_column']}",
+                    "_key": key,
+                }
+            )
+
+        fk_by_col = {row["_key"]: row["foreign_key"] for row in rows}
+        out: List[Dict[str, Any]] = []
+        for col in schema.columns:
+            out.append(
+                {
+                    "name": col.name,
+                    "data_type": col.data_type,
+                    "primary_key": col.primary_key,
+                    "not_null": col.not_null,
+                    "foreign_key": fk_by_col.get(col.name.lower()),
+                }
+            )
+        return out
 
     def _create_table(self, stmt: CreateTableStmt) -> str:
         key = stmt.table_name.lower()
@@ -242,10 +283,10 @@ class Executor:
         # Fast path is intentionally narrow: single predicate "pk = value" and no reordering.
         if stmt.order_by is not None:
             return None
-        if len(stmt.where.predicates) != 1:
+        if len(stmt.where.groups) != 1 or len(stmt.where.groups[0]) != 1:
             return None
 
-        col_name, op, raw_value = stmt.where.predicates[0]
+        col_name, op, raw_value = stmt.where.groups[0][0]
         if op != "=" or col_name.lower() != pk_col.name.lower() or raw_value is None:
             return None
 
@@ -504,14 +545,30 @@ class Executor:
         return bytes(out)
 
     def _matches_where(self, schema: TableSchema, values: List[Any], where: WhereClause) -> bool:
-        for col_name, op, raw_value in where.predicates:
-            idx = schema.column_index(col_name)
-            col = schema.columns[idx]
-            right = coerce_value(raw_value, col.data_type) if raw_value is not None else None
-            left = values[idx]
-            if not self._compare(left, op, right):
-                return False
-        return True
+        for group in where.groups:
+            group_matches = True
+            for col_name, op, raw_value in group:
+                idx = schema.column_index(col_name)
+                col = schema.columns[idx]
+                left = values[idx]
+
+                if op == "IN":
+                    if not isinstance(raw_value, list):
+                        raise ValueError("IN predicate requires a list of values")
+                    right_values = [coerce_value(item, col.data_type) if item is not None else None for item in raw_value]
+                    if left not in right_values:
+                        group_matches = False
+                        break
+                    continue
+
+                right = coerce_value(raw_value, col.data_type) if raw_value is not None else None
+                if not self._compare(left, op, right):
+                    group_matches = False
+                    break
+
+            if group_matches:
+                return True
+        return False
 
     def _compare(self, left: Any, op: str, right: Any) -> bool:
         if op == "=":

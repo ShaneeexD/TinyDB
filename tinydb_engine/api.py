@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
+from tinydb_engine.ast_nodes import BeginStmt, CommitStmt, RollbackStmt
 from tinydb_engine.executor import Executor
 from tinydb_engine.parser import parse
 from tinydb_engine.security import hash_password, verify_password
@@ -15,9 +16,35 @@ class TinyDB:
         self.wal = WAL(path)
         self.pager = Pager(path, wal=self.wal)
         self.executor = Executor(self.pager)
+        self._explicit_tx_active = False
 
-    def execute(self, sql: str) -> Any:
+    def execute(self, sql: str, params: Sequence[Any] | None = None) -> Any:
+        if params is not None:
+            sql = self._bind_params(sql, params)
         stmt = parse(sql)
+
+        if isinstance(stmt, BeginStmt):
+            if self._explicit_tx_active:
+                raise ValueError("Transaction already active")
+            self.pager.begin()
+            self._explicit_tx_active = True
+            return "OK"
+        if isinstance(stmt, CommitStmt):
+            if not self._explicit_tx_active:
+                raise ValueError("No active transaction to COMMIT")
+            self.pager.commit()
+            self._explicit_tx_active = False
+            return "OK"
+        if isinstance(stmt, RollbackStmt):
+            if not self._explicit_tx_active:
+                raise ValueError("No active transaction to ROLLBACK")
+            self.pager.rollback()
+            self._explicit_tx_active = False
+            return "OK"
+
+        if self._explicit_tx_active:
+            return self.executor.execute(stmt)
+
         self.pager.begin()
         try:
             result = self.executor.execute(stmt)
@@ -26,6 +53,40 @@ class TinyDB:
         except Exception:
             self.pager.rollback()
             raise
+
+    def _bind_params(self, sql: str, params: Sequence[Any]) -> str:
+        pieces: list[str] = []
+        param_idx = 0
+        in_string = False
+        for ch in sql:
+            if ch == "'":
+                in_string = not in_string
+                pieces.append(ch)
+                continue
+            if ch == "?" and not in_string:
+                if param_idx >= len(params):
+                    raise ValueError("Not enough parameters for SQL placeholders")
+                pieces.append(self._to_sql_literal(params[param_idx]))
+                param_idx += 1
+                continue
+            pieces.append(ch)
+
+        if param_idx != len(params):
+            raise ValueError("Too many parameters for SQL placeholders")
+        return "".join(pieces)
+
+    def _to_sql_literal(self, value: Any) -> str:
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, (int, float)):
+            return str(value)
+
+        text = str(value)
+        if "'" in text:
+            raise ValueError("Single quotes are not supported in parameterized TEXT values")
+        return f"'{text}'"
 
     def create_user(self, username: str, password: str, table_name: str = "users") -> str:
         clean_username = username.strip()

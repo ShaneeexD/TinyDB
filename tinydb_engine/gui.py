@@ -75,14 +75,18 @@ Use only syntax supported by tinydb_engine:
 - ALTER TABLE ... RENAME COLUMN ... TO ...
 - ALTER TABLE ... ADD COLUMN ...
 - ALTER TABLE ... REMOVE COLUMN ...
+- SHOW TABLES
+- DESCRIBE table_name
+- BEGIN / COMMIT / ROLLBACK
 
 Important limitations:
 - Available SQL column types: INTEGER, TEXT, REAL, BOOLEAN, TIMESTAMP.
 - TIMESTAMP values should be string literals (example: '2023-04-01 12:34:56').
-- WHERE supports AND-combined predicates only.
+- WHERE supports AND/OR predicates and IN (...).
 - ALTER TABLE ADD COLUMN supports nullable non-PK columns only.
 - ALTER TABLE REMOVE COLUMN supports only removing the last non-PK column.
 - Identifiers must match schema names exactly (e.g. player_id, not "player id").
+- Return only one SQL statement.
 
 Generate practical SQL using available schema context.
 """
@@ -415,6 +419,7 @@ class TinyDBGui:
             padx=4,
         )
         ttk.Button(schema_actions, text="Rename Column", command=self._rename_column_selected_table).pack(side=tk.LEFT)
+        ttk.Button(schema_actions, text="Describe", command=self._describe_selected_table).pack(side=tk.LEFT, padx=4)
         ttk.Button(schema_actions, text="Drop Table", command=self._drop_selected_table).pack(side=tk.RIGHT)
 
         query_frame = ttk.Frame(right)
@@ -777,7 +782,7 @@ class TinyDBGui:
 
         col_type = simpledialog.askstring(
             "Add Column",
-            "Column type (TEXT, INTEGER, FLOAT, BOOLEAN, TIMESTAMP):\n"
+            "Column type (TEXT, INTEGER, REAL, BOOLEAN, TIMESTAMP):\n"
             "Note: Added columns are nullable and cannot be PRIMARY KEY/NOT NULL.",
             initialvalue="TEXT",
             parent=self.root,
@@ -785,7 +790,7 @@ class TinyDBGui:
         if col_type is None:
             return
         clean_type = col_type.strip().upper()
-        if clean_type not in {"TEXT", "INTEGER", "FLOAT", "BOOLEAN", "TIMESTAMP"}:
+        if clean_type not in {"TEXT", "INTEGER", "REAL", "BOOLEAN", "TIMESTAMP"}:
             messagebox.showerror("Add Column", "Unsupported type.")
             return
 
@@ -911,6 +916,24 @@ class TinyDBGui:
         except Exception as exc:
             self._log_exception("Drop table failed", exc)
             messagebox.showerror("Drop Table Failed", str(exc))
+
+    def _describe_selected_table(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Describe Table", "Open a database first.")
+            return
+
+        table_name = self._selected_table_name()
+        if table_name is None:
+            messagebox.showinfo("Describe Table", "Select a table first.")
+            return
+
+        try:
+            rows = self.db.execute(f"DESCRIBE {table_name}")
+            self._show_result_rows(rows)
+            self._print_output(f"Described table '{table_name}'", level="INFO")
+        except Exception as exc:
+            self._log_exception("Describe table failed", exc)
+            messagebox.showerror("Describe Table Failed", str(exc))
 
     def _selected_table_name(self) -> str | None:
         selection = self.table_list.curselection()
@@ -1604,13 +1627,7 @@ class TinyDBGui:
         db_path = self.db_path_var.get().strip() or "(unknown)"
         table_count = len(self.db.executor.schemas)
         selected = self._selected_table_name()
-        selected_info = ""
-        if selected:
-            try:
-                row_count = len(self.db.execute(f"SELECT * FROM {selected}"))
-                selected_info = f" | selected={selected} ({row_count} rows)"
-            except Exception:
-                selected_info = f" | selected={selected}"
+        selected_info = f" | selected={selected}" if selected else ""
         self.status_var.set(
             f"DB: {db_path} | tables={table_count} | last query={self.last_query_ms:.1f} ms{selected_info}"
         )
@@ -1641,6 +1658,9 @@ class TinyDBGui:
             return
 
         try:
+            if not rows:
+                messagebox.showinfo("Export CSV", "There are no rows to export.")
+                return
             columns = list(rows[0].keys()) if rows else []
             with open(path, "w", encoding="utf-8", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=columns)
@@ -1690,11 +1710,26 @@ class TinyDBGui:
                 if unknown:
                     raise ValueError(f"CSV has unknown column(s): {', '.join(unknown)}")
 
-                inserted = 0
-                for line_no, row in enumerate(reader, start=2):
+                header_lookup = {name.lower(): name for name in csv_cols}
+                rows = list(reader)
+                if not rows:
+                    raise ValueError("CSV has no data rows")
+
+                should_continue = messagebox.askyesno(
+                    "Import CSV",
+                    f"Import {len(rows)} row(s) into '{table_name}'?\n\n"
+                    f"CSV columns: {', '.join(csv_cols)}",
+                    parent=self.root,
+                )
+                if not should_continue:
+                    return
+
+                prepared_sql_values: list[list[str]] = []
+                for line_no, row in enumerate(rows, start=2):
                     values_sql: list[str] = []
                     for col in schema.columns:
-                        raw = row.get(col.name)
+                        source_name = header_lookup.get(col.name.lower())
+                        raw = row.get(source_name) if source_name is not None else None
                         if raw is None:
                             if col.not_null or col.primary_key:
                                 raise ValueError(f"Row {line_no}: missing required column '{col.name}'")
@@ -1704,9 +1739,17 @@ class TinyDBGui:
                             if cleaned == "":
                                 typed_value = None
                             else:
-                                typed_value = _parse_editor_value(col.data_type, cleaned)
+                                try:
+                                    typed_value = _parse_editor_value(col.data_type, cleaned)
+                                except Exception as exc:
+                                    raise ValueError(
+                                        f"Row {line_no}, column '{col.name}': invalid {col.data_type} value '{cleaned}'"
+                                    ) from exc
                         values_sql.append(_to_sql_literal(typed_value))
+                    prepared_sql_values.append(values_sql)
 
+                inserted = 0
+                for values_sql in prepared_sql_values:
                     self.db.execute(f"INSERT INTO {table_name} VALUES ({', '.join(values_sql)})")
                     inserted += 1
 

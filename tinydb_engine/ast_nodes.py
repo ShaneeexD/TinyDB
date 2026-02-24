@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Tuple
 
 
+Predicate = Tuple[str, str, Any]
+
+
 @dataclass(frozen=True)
 class ColumnDef:
     name: str
@@ -14,8 +17,8 @@ class ColumnDef:
 
 @dataclass(frozen=True)
 class WhereClause:
-    # AND-only predicates keep the MVP parser small and deterministic.
-    predicates: List[Tuple[str, str, Any]]
+    # OR of AND groups. Each inner list is AND-combined predicates.
+    groups: List[List[Predicate]]
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,31 @@ class AlterTableRemoveColumnStmt:
     column_name: str
 
 
+@dataclass(frozen=True)
+class BeginStmt:
+    pass
+
+
+@dataclass(frozen=True)
+class CommitStmt:
+    pass
+
+
+@dataclass(frozen=True)
+class RollbackStmt:
+    pass
+
+
+@dataclass(frozen=True)
+class ShowTablesStmt:
+    pass
+
+
+@dataclass(frozen=True)
+class DescribeTableStmt:
+    table_name: str
+
+
 Statement = (
     CreateTableStmt
     | InsertStmt
@@ -95,4 +123,9 @@ Statement = (
     | AlterTableRenameColumnStmt
     | AlterTableAddColumnStmt
     | AlterTableRemoveColumnStmt
+    | BeginStmt
+    | CommitStmt
+    | RollbackStmt
+    | ShowTablesStmt
+    | DescribeTableStmt
 )
