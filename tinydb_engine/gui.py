@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
 import re
 import threading
+import time
 import tkinter as tk
 import traceback
 import urllib.error
@@ -156,7 +158,12 @@ class TinyDBGui:
     def __init__(self, root: tk.Tk, db_path: str | None):
         self.root = root
         self.root.title("TinyDB Viewer")
-        self.root.geometry("1200x820")
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        default_w = max(980, min(1200, screen_w - 80))
+        default_h = max(700, min(820, screen_h - 120))
+        self.root.geometry(f"{default_w}x{default_h}")
+        self.root.minsize(960, 680)
         self.root.configure(bg="#f6f8fb")
 
         self._config = self._load_config()
@@ -173,9 +180,13 @@ class TinyDBGui:
         self.history_expanded_var = tk.BooleanVar(value=False)
         self.snippets_expanded_var = tk.BooleanVar(value=False)
         self.ai_expanded_var = tk.BooleanVar(value=False)
+        self.guardrail_mode_var = tk.StringVar(value="Off")
         self.autocomplete_popup: tk.Toplevel | None = None
         self.autocomplete_list: tk.Listbox | None = None
         self.ai_request_inflight = False
+        self.last_error_details = ""
+        self.last_result_rows: list[dict[str, Any]] = []
+        self.last_query_ms = 0.0
         self.log_file_path = os.path.abspath(GUI_LOG_FILE)
         self.logger = self._build_logger()
 
@@ -431,6 +442,17 @@ class TinyDBGui:
         btns.pack(fill=tk.X, pady=6)
         ttk.Button(btns, text="Run SQL", command=self.run_sql).pack(side=tk.LEFT)
         ttk.Button(btns, text="Refresh Metadata", command=self.refresh_metadata).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Export CSV", command=self._export_csv).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Import CSV", command=self._import_csv).pack(side=tk.LEFT)
+        ttk.Label(btns, text="Guardrails:").pack(side=tk.LEFT, padx=(12, 4))
+        guardrail_combo = ttk.Combobox(
+            btns,
+            textvariable=self.guardrail_mode_var,
+            values=["Off", "Read-only", "Block destructive"],
+            state="readonly",
+            width=18,
+        )
+        guardrail_combo.pack(side=tk.LEFT)
 
         history_frame = ttk.LabelFrame(query_frame, text="SQL History")
         history_frame.pack(fill=tk.X, pady=(0, 8))
@@ -546,12 +568,25 @@ class TinyDBGui:
         results_wrap.rowconfigure(0, weight=1)
 
         ttk.Label(query_frame, text="Messages", style="Header.TLabel").pack(anchor=tk.W, pady=(8, 0))
-        self.output = tk.Text(query_frame, wrap=tk.WORD, height=5)
+        self.output = tk.Text(query_frame, wrap=tk.WORD, height=6)
         self.output.pack(fill=tk.X)
         self.output.configure(bg="#ffffff", relief=tk.FLAT, padx=8, pady=6, font=("Consolas", 10))
         self.output.tag_configure("INFO", foreground="#1f2937")
         self.output.tag_configure("ERROR", foreground="#b91c1c")
         self.output.tag_configure("WARN", foreground="#92400e")
+
+        diagnostics_frame = ttk.LabelFrame(query_frame, text="Diagnostics")
+        diagnostics_frame.pack(fill=tk.X, pady=(8, 0))
+        self.diagnostics_text = tk.Text(diagnostics_frame, wrap=tk.WORD, height=4)
+        self.diagnostics_text.pack(fill=tk.X, padx=8, pady=(6, 4))
+        self.diagnostics_text.configure(bg="#ffffff", relief=tk.FLAT, padx=8, pady=6, font=("Consolas", 9))
+        self.diagnostics_text.configure(state=tk.DISABLED)
+        diag_btns = ttk.Frame(diagnostics_frame)
+        diag_btns.pack(fill=tk.X, padx=8, pady=(0, 6))
+        ttk.Button(diag_btns, text="Copy Error Details", command=self._copy_error_details).pack(side=tk.LEFT)
+
+        self.status_var = tk.StringVar(value="No DB open")
+        ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, relief=tk.SUNKEN).pack(fill=tk.X, side=tk.BOTTOM)
 
     def _browse(self) -> None:
         path = filedialog.askopenfilename(
@@ -583,6 +618,7 @@ class TinyDBGui:
             self._save_config()
             self._print_output(f"Opened: {path}", level="INFO")
             self.refresh_metadata()
+            self._update_status()
         except Exception as exc:
             self._log_exception("Open DB failed", exc)
             messagebox.showerror("Open DB Failed", str(exc))
@@ -595,6 +631,7 @@ class TinyDBGui:
         for table_name in sorted(table.name for table in schemas.values()):
             self.table_list.insert(tk.END, table_name)
         self._set_schema_text("Select a table to view schema")
+        self._update_status()
 
     def _on_table_select(self, _event: Any) -> None:
         if self.db is None:
@@ -616,6 +653,7 @@ class TinyDBGui:
             tail = f" {' '.join(suffix)}" if suffix else ""
             lines.append(f"- {col.name}: {col.data_type}{tail}")
         self._set_schema_text("\n".join(lines))
+        self._update_status()
 
     def _on_table_double_click(self, _event: Any) -> None:
         if self.db is None:
@@ -1186,6 +1224,9 @@ class TinyDBGui:
         if not sql:
             return
 
+        if not self._guardrails_allow_sql(sql, parent=self.root):
+            return
+
         self._execute_sql_text(sql)
 
     def ai_generate_sql(self) -> None:
@@ -1298,6 +1339,9 @@ class TinyDBGui:
             if not should_run:
                 self._print_output("AI query generated but not executed.", level="WARN")
                 return
+
+        if not self._guardrails_allow_sql(sql, parent=self.root):
+            return
         self._execute_sql_text(sql)
 
     def _on_ai_failure(self, exc: Exception) -> None:
@@ -1447,11 +1491,43 @@ class TinyDBGui:
         first = stripped.split(None, 1)[0].upper()
         return first in {"INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "CREATE"}
 
+    def _sql_first_keyword(self, sql: str) -> str:
+        stripped = sql.strip().lstrip("(")
+        if not stripped:
+            return ""
+        return stripped.split(None, 1)[0].upper()
+
+    def _guardrails_allow_sql(self, sql: str, parent: tk.Misc | None = None) -> bool:
+        mode = self.guardrail_mode_var.get().strip() or "Off"
+        if mode == "Off":
+            return True
+
+        first = self._sql_first_keyword(sql)
+        if not first:
+            return True
+
+        if mode == "Read-only" and first != "SELECT":
+            msg = "Guardrails (Read-only) blocked this query. Only SELECT is allowed."
+            self._print_output(msg, level="WARN")
+            messagebox.showwarning("Guardrails Blocked Query", msg, parent=parent)
+            return False
+
+        if mode == "Block destructive" and first in {"DROP", "DELETE"}:
+            msg = "Guardrails (Block destructive) blocked this query (DROP/DELETE)."
+            self._print_output(msg, level="WARN")
+            messagebox.showwarning("Guardrails Blocked Query", msg, parent=parent)
+            return False
+
+        return True
+
     def _execute_sql_text(self, sql: str) -> None:
         try:
+            self._set_diagnostics_text("")
             self._record_query_history(sql)
             self._print_output(f"Running SQL: {sql}", level="INFO")
+            started = time.perf_counter()
             result = self.db.execute(sql)
+            self.last_query_ms = (time.perf_counter() - started) * 1000.0
             if isinstance(result, list) and (not result or isinstance(result[0], dict)):
                 self._show_result_rows(result)
                 self._print_output(f"Query succeeded: {len(result)} row(s)", level="INFO")
@@ -1459,10 +1535,15 @@ class TinyDBGui:
                 self._clear_result_rows()
                 self._print_output(f"Command result: {result}", level="INFO")
             self.refresh_metadata()
+            self._update_status()
         except Exception as exc:
+            self.last_query_ms = 0.0
             self._clear_result_rows()
             self._log_exception("SQL execution failed", exc)
             msg = str(exc)
+            diagnostics = self._build_diagnostics_message(exc)
+            self.last_error_details = diagnostics
+            self._set_diagnostics_text(diagnostics)
             if isinstance(exc, ParseError) and msg == "Unsupported SQL syntax":
                 msg = (
                     "Unsupported SQL syntax. Hint: column/table names cannot contain spaces. "
@@ -1470,6 +1551,171 @@ class TinyDBGui:
                 )
             self._print_output(f"SQL error: {msg}. See log file for traceback.", level="ERROR")
             messagebox.showerror("SQL Execution Failed", msg)
+            self._update_status()
+
+    def _build_diagnostics_message(self, exc: Exception) -> str:
+        message = str(exc)
+        lines = [f"Error: {message}"]
+
+        suggestions: list[str] = []
+        lower_msg = message.lower()
+        if isinstance(exc, ParseError):
+            if "near:" in message:
+                suggestions.append("Check the token near the shown snippet for typos or unsupported characters.")
+            suggestions.append("Verify SQL keyword order and punctuation (commas, parentheses, quotes).")
+        if "unknown table" in lower_msg:
+            suggestions.append("Confirm the table name matches exactly (including underscores).")
+        if "unknown column" in lower_msg:
+            suggestions.append("Confirm the column exists in the selected table schema.")
+        if "not null" in lower_msg:
+            suggestions.append("Provide a non-NULL value for required columns.")
+        if "foreign key" in lower_msg:
+            suggestions.append("Insert/update parent rows first, or use a valid referenced value.")
+        if "duplicate primary key" in lower_msg:
+            suggestions.append("Use a unique PRIMARY KEY value.")
+
+        if suggestions:
+            lines.append("Likely fixes:")
+            for idx, tip in enumerate(suggestions, start=1):
+                lines.append(f"{idx}. {tip}")
+        return "\n".join(lines)
+
+    def _set_diagnostics_text(self, text: str) -> None:
+        self.diagnostics_text.configure(state=tk.NORMAL)
+        self.diagnostics_text.delete("1.0", tk.END)
+        if text:
+            self.diagnostics_text.insert("1.0", text)
+        self.diagnostics_text.configure(state=tk.DISABLED)
+
+    def _copy_error_details(self) -> None:
+        details = self.last_error_details.strip()
+        if not details:
+            messagebox.showinfo("Diagnostics", "No error details to copy.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(details)
+        self._print_output("Copied diagnostics to clipboard.", level="INFO")
+
+    def _update_status(self) -> None:
+        if self.db is None:
+            self.status_var.set("No DB open")
+            return
+
+        db_path = self.db_path_var.get().strip() or "(unknown)"
+        table_count = len(self.db.executor.schemas)
+        selected = self._selected_table_name()
+        selected_info = ""
+        if selected:
+            try:
+                row_count = len(self.db.execute(f"SELECT * FROM {selected}"))
+                selected_info = f" | selected={selected} ({row_count} rows)"
+            except Exception:
+                selected_info = f" | selected={selected}"
+        self.status_var.set(
+            f"DB: {db_path} | tables={table_count} | last query={self.last_query_ms:.1f} ms{selected_info}"
+        )
+
+    def _export_csv(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Export CSV", "Open a database first.")
+            return
+
+        rows = self.last_result_rows
+        if not rows:
+            table_name = self._selected_table_name()
+            if table_name is None:
+                messagebox.showinfo("Export CSV", "Run a query or select a table first.")
+                return
+            try:
+                rows = self.db.execute(f"SELECT * FROM {table_name}")
+            except Exception as exc:
+                messagebox.showerror("Export CSV Failed", str(exc))
+                return
+
+        path = filedialog.asksaveasfilename(
+            title="Export CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            columns = list(rows[0].keys()) if rows else []
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                if columns:
+                    writer.writeheader()
+                    for row in rows:
+                        writer.writerow({col: row.get(col) for col in columns})
+            self._print_output(f"Exported {len(rows)} row(s) to CSV: {path}", level="INFO")
+        except Exception as exc:
+            self._log_exception("CSV export failed", exc)
+            messagebox.showerror("Export CSV Failed", str(exc))
+
+    def _import_csv(self) -> None:
+        if self.db is None:
+            messagebox.showwarning("Import CSV", "Open a database first.")
+            return
+
+        table_name = self._selected_table_name()
+        if table_name is None:
+            messagebox.showinfo("Import CSV", "Select a target table first.")
+            return
+
+        schema = self.db.executor.schemas.get(table_name.lower())
+        if schema is None:
+            messagebox.showerror("Import CSV", "Selected table schema not found.")
+            return
+
+        path = filedialog.askopenfilename(
+            title="Import CSV",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                if not reader.fieldnames:
+                    raise ValueError("CSV must include a header row")
+
+                csv_cols = [name.strip() for name in reader.fieldnames if name and name.strip()]
+                if not csv_cols:
+                    raise ValueError("CSV header contains no usable column names")
+
+                schema_cols = [col.name for col in schema.columns]
+                unknown = [name for name in csv_cols if name.lower() not in {c.lower() for c in schema_cols}]
+                if unknown:
+                    raise ValueError(f"CSV has unknown column(s): {', '.join(unknown)}")
+
+                inserted = 0
+                for line_no, row in enumerate(reader, start=2):
+                    values_sql: list[str] = []
+                    for col in schema.columns:
+                        raw = row.get(col.name)
+                        if raw is None:
+                            if col.not_null or col.primary_key:
+                                raise ValueError(f"Row {line_no}: missing required column '{col.name}'")
+                            typed_value = None
+                        else:
+                            cleaned = raw.strip()
+                            if cleaned == "":
+                                typed_value = None
+                            else:
+                                typed_value = _parse_editor_value(col.data_type, cleaned)
+                        values_sql.append(_to_sql_literal(typed_value))
+
+                    self.db.execute(f"INSERT INTO {table_name} VALUES ({', '.join(values_sql)})")
+                    inserted += 1
+
+            self.refresh_metadata()
+            self._print_output(f"Imported {inserted} row(s) from CSV into {table_name}", level="INFO")
+            self._update_status()
+        except Exception as exc:
+            self._log_exception("CSV import failed", exc)
+            messagebox.showerror("Import CSV Failed", str(exc))
 
     def _set_schema_text(self, text: str) -> None:
         self.schema_text.configure(state=tk.NORMAL)
@@ -1489,9 +1735,11 @@ class TinyDBGui:
     def _clear_result_rows(self) -> None:
         self.result_tree.delete(*self.result_tree.get_children())
         self.result_tree["columns"] = ()
+        self.last_result_rows = []
 
     def _show_result_rows(self, rows: list[dict[str, Any]]) -> None:
         self._clear_result_rows()
+        self.last_result_rows = list(rows)
         if not rows:
             return
 
