@@ -38,7 +38,7 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
 - WAL-based crash recovery
 - Python API + interactive REPL CLI
 
-## Install (Consumer)
+## Install
 
 ### Windows quick install
 
