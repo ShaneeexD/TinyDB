@@ -19,11 +19,15 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
   - `ALTER TABLE ... RENAME COLUMN ... TO ...`
   - `ALTER TABLE ... ADD COLUMN ...`
   - `ALTER TABLE ... REMOVE COLUMN ...`
+  - `SHOW TABLES`
+  - `DESCRIBE table_name`
+  - `BEGIN`, `COMMIT`, `ROLLBACK`
 - Data types:
-  - `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`
+  - `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`
 - Constraints:
   - single-column `PRIMARY KEY`
   - `NOT NULL`
+  - `FOREIGN KEY (col) REFERENCES other_table(other_col)`
   - Note: `ALTER TABLE ... ADD COLUMN` currently allows nullable, non-PK columns only.
   - Note: `ALTER TABLE ... REMOVE COLUMN` currently supports removing only the last non-PK column.
 - Primary key B-tree index (with PK equality lookup fast path)
@@ -32,15 +36,28 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
 
 ## Install
 
+### Quick install (Windows, easiest)
+
+From this repo root, double-click:
+
+- `install.bat`
+
+This creates a local `.venv` and installs `tinydb_engine` in editable mode.
+
+### Manual install (PowerShell)
+
 From this repo root:
 
 ```powershell
-python -m pip install -e .
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -U pip
+.\.venv\Scripts\python -m pip install -e .
 ```
 
 This installs:
 - the importable package (`tinydb_engine`)
 - the console command (`tinydb`)
+- the GUI command (`tinydb-gui`)
 
 ## Quick Start (Python API)
 
@@ -156,6 +173,19 @@ In the GUI:
 - double-click a table to open a full row browser window (no `SELECT *` needed)
 - in the row browser, select a row and click `Edit Selected Row` to update values
 
+### Windows GUI helper scripts
+
+- `install_gui_deps.bat`  
+  Creates `.venv` if needed, upgrades pip, installs package for GUI use.
+- `run_gui.bat`  
+  Runs `python -m tinydb_engine.gui` via `.venv`, forwarding optional DB path args.
+
+Example:
+
+```powershell
+run_gui.bat myfile.db
+```
+
 ## Running Tests
 
 From repo root:
@@ -187,10 +217,10 @@ python -m pip install .\dist\tinydb_engine-0.1.0-py3-none-any.whl
 
 ## Current MVP Notes / Limitations
 
-- `WHERE` supports comparison predicates combined with `AND` only.
+- `WHERE` supports `AND`, `OR`, and `IN (...)` predicates.
 - `PRIMARY KEY` support is single-column.
 - `ORDER BY` is in-memory sort.
-- Transactions are implicit per statement (no explicit SQL `BEGIN/COMMIT` yet).
+- Transactions are implicit per statement unless explicit `BEGIN ... COMMIT/ROLLBACK` is used.
 - SQL parser is intentionally small and supports a practical subset.
 
 ## Project Layout
