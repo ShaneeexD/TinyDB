@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import struct
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -8,6 +9,7 @@ from tinydb_engine.ast_nodes import (
     AlterTableRemoveColumnStmt,
     AlterTableRenameColumnStmt,
     AlterTableRenameStmt,
+    CreateIndexStmt,
     DescribeTableStmt,
     CreateTableStmt,
     DeleteStmt,
@@ -43,6 +45,8 @@ class Executor:
             return self._describe_table(statement)
         if isinstance(statement, CreateTableStmt):
             return self._create_table(statement)
+        if isinstance(statement, CreateIndexStmt):
+            return self._create_index(statement)
         if isinstance(statement, AlterTableRenameStmt):
             return self._alter_table_rename(statement)
         if isinstance(statement, AlterTableRenameColumnStmt):
@@ -84,6 +88,11 @@ class Executor:
             )
 
         fk_by_col = {row["_key"]: row["foreign_key"] for row in rows}
+        idx_by_col: Dict[str, List[str]] = {}
+        for idx in schema.secondary_indexes or []:
+            key = str(idx["column"]).lower()
+            idx_by_col.setdefault(key, []).append(str(idx["name"]))
+
         out: List[Dict[str, Any]] = []
         for col in schema.columns:
             out.append(
@@ -92,7 +101,10 @@ class Executor:
                     "data_type": col.data_type,
                     "primary_key": col.primary_key,
                     "not_null": col.not_null,
+                    "unique": col.unique,
+                    "default": col.default_value,
                     "foreign_key": fk_by_col.get(col.name.lower()),
+                    "indexes": idx_by_col.get(col.name.lower(), []),
                 }
             )
         return out
@@ -108,6 +120,12 @@ class Executor:
                 data_type=normalize_type(col.data_type),
                 primary_key=col.primary_key,
                 not_null=col.not_null,
+                unique=col.unique,
+                default_value=(
+                    coerce_value(col.default_value, normalize_type(col.data_type))
+                    if col.default_value is not None
+                    else None
+                ),
             )
             for col in stmt.columns
         ]
@@ -143,6 +161,7 @@ class Executor:
             data_page_ids=[data_page],
             pk_index_root_page=index.root_page_id,
             foreign_keys=foreign_keys,
+            secondary_indexes=[],
         )
         self.schemas[key] = schema
         self.catalog.save(self.schemas)
@@ -158,8 +177,41 @@ class Executor:
             raise ValueError("Cannot remove PRIMARY KEY column")
         if remove_idx != len(schema.columns) - 1:
             raise ValueError("ALTER TABLE REMOVE COLUMN currently supports only the last column")
+        if schema.secondary_indexes:
+            for idx in schema.secondary_indexes:
+                if idx["column"].lower() == stmt.column_name.lower():
+                    raise ValueError("Cannot remove a column with an index")
 
         del schema.columns[remove_idx]
+        self.catalog.save(self.schemas)
+        return "OK"
+
+    def _create_index(self, stmt: CreateIndexStmt) -> str:
+        schema = self._schema(stmt.table_name)
+        if schema.secondary_indexes is None:
+            schema.secondary_indexes = []
+        if any(idx["name"].lower() == stmt.index_name.lower() for idx in schema.secondary_indexes):
+            raise ValueError(f"Index already exists: {stmt.index_name}")
+
+        col_idx = schema.column_index(stmt.column_name)
+        col = schema.columns[col_idx]
+        if not col.unique:
+            raise ValueError("CREATE INDEX currently supports UNIQUE columns only")
+
+        btree = BTreeIndex.create(self.pager)
+        for row in self._scan_rows(schema):
+            value = row["values"][col_idx]
+            if value is None:
+                continue
+            btree.insert(value, (row["page_id"], row["slot_id"]))
+
+        schema.secondary_indexes.append(
+            {
+                "name": stmt.index_name,
+                "column": col.name,
+                "root_page": btree.root_page_id,
+            }
+        )
         self.catalog.save(self.schemas)
         return "OK"
 
@@ -195,6 +247,9 @@ class Executor:
                 raise ValueError(f"Column already exists: {stmt.new_column_name}")
 
         schema.columns[old_idx].name = stmt.new_column_name
+        for idx in schema.secondary_indexes or []:
+            if idx["column"].lower() == stmt.old_column_name.lower():
+                idx["column"] = stmt.new_column_name
         self.catalog.save(self.schemas)
         return "OK"
 
@@ -210,12 +265,18 @@ class Executor:
         if stmt.column.not_null:
             raise ValueError("ALTER TABLE ADD COLUMN does not support NOT NULL")
 
+        default_value = stmt.column.default_value
+        if default_value is not None:
+            default_value = coerce_value(default_value, normalize_type(stmt.column.data_type))
+
         schema.columns.append(
             ColumnSchema(
                 name=stmt.column.name,
                 data_type=normalize_type(stmt.column.data_type),
                 primary_key=False,
                 not_null=False,
+                unique=stmt.column.unique,
+                default_value=default_value,
             )
         )
         self.catalog.save(self.schemas)
@@ -226,6 +287,7 @@ class Executor:
         pk_col = schema.pk_column
         pk_idx = schema.column_index(pk_col.name) if pk_col is not None else None
         btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_col is not None else None
+        sec_btrees = self._secondary_btrees(schema)
 
         for raw_row in stmt.values:
             values = self._materialize_insert_values(schema, stmt.columns, list(raw_row))
@@ -239,19 +301,34 @@ class Executor:
                     raise ValueError("Duplicate primary key")
 
             self._validate_foreign_keys(schema, values)
+            self._enforce_unique_constraints(schema, values)
 
             page_id, slot_id = self._insert_row(schema, values)
             if pk_idx is not None and btree is not None:
                 btree.insert(values[pk_idx], (page_id, slot_id))
+            for idx_meta, sec_btree in sec_btrees:
+                col_idx = schema.column_index(idx_meta["column"])
+                idx_value = values[col_idx]
+                if idx_value is None:
+                    continue
+                sec_btree.insert(idx_value, (page_id, slot_id))
 
         if pk_idx is not None and btree is not None:
             schema.pk_index_root_page = btree.root_page_id
+        for idx_meta, sec_btree in sec_btrees:
+            idx_meta["root_page"] = sec_btree.root_page_id
+        if pk_idx is not None or sec_btrees:
             self.catalog.save(self.schemas)
         return "OK"
 
     def _select(self, stmt: SelectStmt) -> List[Dict[str, Any]]:
+        if stmt.join_table is not None:
+            return self._select_with_join(stmt)
+
         schema = self._schema(stmt.table_name)
         rows = self._select_pk_fast_path(schema, stmt)
+        if rows is None:
+            rows = self._select_secondary_index_fast_path(schema, stmt)
         if rows is None:
             rows = self._scan_rows(schema)
 
@@ -275,9 +352,64 @@ class Executor:
         indices = [schema.column_index(name) for name in out_cols]
         return [{c: row["values"][i] for c, i in zip(out_cols, indices)} for row in rows]
 
+    def _select_with_join(self, stmt: SelectStmt) -> List[Dict[str, Any]]:
+        if stmt.join_table is None or stmt.join_left_column is None or stmt.join_right_column is None:
+            raise ValueError("JOIN requires table and ON columns")
+        if stmt.columns == ["*"]:
+            raise ValueError("SELECT * is not supported with JOIN; explicitly select columns")
+
+        left_schema = self._schema(stmt.table_name)
+        right_schema = self._schema(stmt.join_table)
+
+        left_rows = self._scan_rows(left_schema)
+        right_rows = self._scan_rows(right_schema)
+
+        left_on = self._join_column_name(left_schema, stmt.table_name, stmt.join_left_column)
+        right_on = self._join_column_name(right_schema, stmt.join_table, stmt.join_right_column)
+        left_on_idx = left_schema.column_index(left_on)
+        right_on_idx = right_schema.column_index(right_on)
+
+        joined: List[Dict[str, Any]] = []
+        for left_row in left_rows:
+            left_value = left_row["values"][left_on_idx]
+            for right_row in right_rows:
+                if left_value != right_row["values"][right_on_idx]:
+                    continue
+                merged = self._merge_join_row(
+                    stmt.table_name,
+                    left_schema,
+                    left_row["values"],
+                    stmt.join_table,
+                    right_schema,
+                    right_row["values"],
+                )
+                if stmt.where and not self._matches_where_join(merged, stmt.where):
+                    continue
+                joined.append(merged)
+
+        if stmt.order_by:
+            col, direction = stmt.order_by
+            reverse = direction.upper() == "DESC"
+            order_key = self._resolve_join_column_key(col, stmt.table_name, left_schema, stmt.join_table, right_schema)
+            joined.sort(key=lambda r: (r.get(order_key) is None, r.get(order_key)), reverse=reverse)
+
+        if stmt.limit is not None:
+            joined = joined[: stmt.limit]
+
+        out: List[Dict[str, Any]] = []
+        for row in joined:
+            out_row: Dict[str, Any] = {}
+            for col in stmt.columns:
+                key = self._resolve_join_column_key(col, stmt.table_name, left_schema, stmt.join_table, right_schema)
+                out_row[col] = row.get(key)
+            out.append(out_row)
+        return out
+
     def _select_pk_fast_path(self, schema: TableSchema, stmt: SelectStmt) -> List[Dict[str, Any]] | None:
         pk_col = schema.pk_column
         if pk_col is None or stmt.where is None:
+            return None
+        if stmt.join_table is not None:
             return None
 
         # Fast path is intentionally narrow: single predicate "pk = value" and no reordering.
@@ -302,6 +434,32 @@ class Executor:
             return []
         return [{"page_id": page_id, "slot_id": slot_id, "values": row_values}]
 
+    def _select_secondary_index_fast_path(self, schema: TableSchema, stmt: SelectStmt) -> List[Dict[str, Any]] | None:
+        if stmt.join_table is not None or stmt.where is None or stmt.order_by is not None:
+            return None
+        if len(stmt.where.groups) != 1 or len(stmt.where.groups[0]) != 1:
+            return None
+
+        col_name, op, raw_value = stmt.where.groups[0][0]
+        if op != "=" or raw_value is None:
+            return None
+
+        for idx_meta in schema.secondary_indexes or []:
+            if idx_meta["column"].lower() != col_name.lower():
+                continue
+            col_idx = schema.column_index(idx_meta["column"])
+            typed_value = coerce_value(raw_value, schema.columns[col_idx].data_type)
+            btree = BTreeIndex(self.pager, int(idx_meta["root_page"]))
+            location = btree.find(typed_value)
+            if location is None:
+                return []
+            page_id, slot_id = location
+            row_values = self._read_row_at(schema, page_id, slot_id)
+            if row_values is None:
+                return []
+            return [{"page_id": page_id, "slot_id": slot_id, "values": row_values}]
+        return None
+
     def _update(self, stmt: UpdateStmt) -> int:
         schema = self._schema(stmt.table_name)
         rows = self._scan_rows(schema)
@@ -311,6 +469,7 @@ class Executor:
         pk_col = schema.pk_column
         pk_idx = schema.column_index(pk_col.name) if pk_col else None
         btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_col else None
+        sec_btrees = self._secondary_btrees(schema)
 
         for row in rows:
             if stmt.where and not self._matches_where(schema, row["values"], stmt.where):
@@ -330,6 +489,7 @@ class Executor:
                     raise ValueError("Duplicate primary key")
 
             self._validate_foreign_keys(schema, new_values)
+            self._enforce_unique_constraints(schema, new_values, skip_row=(row["page_id"], row["slot_id"]))
 
             page = self.pager.read_page(row["page_id"])
             page_obj = self._read_table_page(page)
@@ -341,9 +501,20 @@ class Executor:
                 btree.delete(old_pk)
                 btree.insert(new_values[pk_idx], (new_page, new_slot))
                 schema.pk_index_root_page = btree.root_page_id
+            for idx_meta, sec_btree in sec_btrees:
+                col_idx = schema.column_index(idx_meta["column"])
+                old_val = row["values"][col_idx]
+                new_val = new_values[col_idx]
+                if old_val is not None:
+                    sec_btree.delete(old_val)
+                if new_val is not None:
+                    sec_btree.insert(new_val, (new_page, new_slot))
             affected += 1
 
-        if affected and pk_idx is not None:
+        if affected:
+            for idx_meta, sec_btree in sec_btrees:
+                idx_meta["root_page"] = sec_btree.root_page_id
+        if affected and (pk_idx is not None or sec_btrees):
             self.catalog.save(self.schemas)
         return affected
 
@@ -385,6 +556,7 @@ class Executor:
         pk_col = schema.pk_column
         pk_idx = schema.column_index(pk_col.name) if pk_col else None
         btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_col else None
+        sec_btrees = self._secondary_btrees(schema)
 
         for row in rows:
             if stmt.where and not self._matches_where(schema, row["values"], stmt.where):
@@ -397,11 +569,25 @@ class Executor:
             if pk_idx is not None and btree:
                 btree.delete(row["values"][pk_idx])
                 schema.pk_index_root_page = btree.root_page_id
+            for idx_meta, sec_btree in sec_btrees:
+                col_idx = schema.column_index(idx_meta["column"])
+                old_val = row["values"][col_idx]
+                if old_val is not None:
+                    sec_btree.delete(old_val)
             affected += 1
 
-        if affected and pk_idx is not None:
+        if affected:
+            for idx_meta, sec_btree in sec_btrees:
+                idx_meta["root_page"] = sec_btree.root_page_id
+        if affected and (pk_idx is not None or sec_btrees):
             self.catalog.save(self.schemas)
         return affected
+
+    def _secondary_btrees(self, schema: TableSchema) -> List[Tuple[dict[str, Any], BTreeIndex]]:
+        out: List[Tuple[dict[str, Any], BTreeIndex]] = []
+        for idx_meta in schema.secondary_indexes or []:
+            out.append((idx_meta, BTreeIndex(self.pager, int(idx_meta["root_page"]))))
+        return out
 
     def _schema(self, table_name: str) -> TableSchema:
         key = table_name.lower()
@@ -425,7 +611,30 @@ class Executor:
             raise ValueError("INSERT columns/value count mismatch")
         for col_name, value in zip(columns, values):
             out[schema.column_index(col_name)] = value
+        for idx, column in enumerate(schema.columns):
+            if out[idx] is None and column.default_value is not None:
+                out[idx] = column.default_value
         return out
+
+    def _enforce_unique_constraints(
+        self,
+        schema: TableSchema,
+        values: List[Any],
+        skip_row: Tuple[int, int] | None = None,
+    ) -> None:
+        unique_indexes = [idx for idx, col in enumerate(schema.columns) if col.unique]
+        if not unique_indexes:
+            return
+
+        for existing in self._scan_rows(schema):
+            if skip_row is not None and (existing["page_id"], existing["slot_id"]) == skip_row:
+                continue
+            for idx in unique_indexes:
+                new_value = values[idx]
+                if new_value is None:
+                    continue
+                if existing["values"][idx] == new_value:
+                    raise ValueError(f"UNIQUE constraint failed: {schema.name}.{schema.columns[idx].name}")
 
     def _coerce_row(self, schema: TableSchema, values: List[Any]) -> List[Any]:
         if len(values) != len(schema.columns):
@@ -471,7 +680,10 @@ class Executor:
         if len(values) > len(schema.columns):
             return values[: len(schema.columns)]
         if len(values) < len(schema.columns):
-            return values + [None] * (len(schema.columns) - len(values))
+            out = list(values)
+            for idx in range(len(values), len(schema.columns)):
+                out.append(schema.columns[idx].default_value)
+            return out
         return values
 
     def _insert_row(self, schema: TableSchema, values: List[Any]) -> Tuple[int, int]:
@@ -552,11 +764,44 @@ class Executor:
                 col = schema.columns[idx]
                 left = values[idx]
 
+                if op == "IS NULL":
+                    if left is not None:
+                        group_matches = False
+                        break
+                    continue
+
+                if op == "IS NOT NULL":
+                    if left is None:
+                        group_matches = False
+                        break
+                    continue
+
                 if op == "IN":
                     if not isinstance(raw_value, list):
                         raise ValueError("IN predicate requires a list of values")
                     right_values = [coerce_value(item, col.data_type) if item is not None else None for item in raw_value]
                     if left not in right_values:
+                        group_matches = False
+                        break
+                    continue
+
+                if op == "NOT IN":
+                    if not isinstance(raw_value, list):
+                        raise ValueError("NOT IN predicate requires a list of values")
+                    right_values = [coerce_value(item, col.data_type) if item is not None else None for item in raw_value]
+                    if left in right_values:
+                        group_matches = False
+                        break
+                    continue
+
+                if op == "LIKE":
+                    if left is None:
+                        group_matches = False
+                        break
+                    if not isinstance(raw_value, str):
+                        raise ValueError("LIKE predicate requires a string pattern")
+                    pattern = "^" + re.escape(raw_value).replace(r"%", ".*").replace(r"_", ".") + "$"
+                    if re.match(pattern, str(left)) is None:
                         group_matches = False
                         break
                     continue
@@ -586,3 +831,108 @@ class Executor:
         if op == ">=":
             return left >= right
         raise ValueError(f"Unsupported operator: {op}")
+
+    def _join_column_name(self, schema: TableSchema, table_name: str, identifier: str) -> str:
+        if "." in identifier:
+            prefix, col_name = identifier.split(".", 1)
+            if prefix.lower() != table_name.lower():
+                raise ValueError(f"JOIN ON column '{identifier}' does not belong to table '{table_name}'")
+            return col_name
+        return identifier
+
+    def _merge_join_row(
+        self,
+        left_table: str,
+        left_schema: TableSchema,
+        left_values: List[Any],
+        right_table: str,
+        right_schema: TableSchema,
+        right_values: List[Any],
+    ) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {}
+        for idx, col in enumerate(left_schema.columns):
+            merged[f"{left_table}.{col.name}"] = left_values[idx]
+        for idx, col in enumerate(right_schema.columns):
+            merged[f"{right_table}.{col.name}"] = right_values[idx]
+        return merged
+
+    def _resolve_join_column_key(
+        self,
+        identifier: str,
+        left_table: str,
+        left_schema: TableSchema,
+        right_table: str,
+        right_schema: TableSchema,
+    ) -> str:
+        if "." in identifier:
+            table, col = identifier.split(".", 1)
+            if table.lower() == left_table.lower():
+                left_schema.column_index(col)
+                return identifier
+            if table.lower() == right_table.lower():
+                right_schema.column_index(col)
+                return identifier
+            raise ValueError(f"Unknown table prefix in JOIN column: {identifier}")
+        left_key = f"{left_table}.{identifier}"
+        right_key = f"{right_table}.{identifier}"
+
+        left_exists = any(col.name.lower() == identifier.lower() for col in left_schema.columns)
+        right_exists = any(col.name.lower() == identifier.lower() for col in right_schema.columns)
+        if left_exists and right_exists:
+            raise ValueError(f"Ambiguous column in JOIN result: {identifier}")
+        if left_exists:
+            return left_key
+        if right_exists:
+            return right_key
+        raise ValueError(f"Unknown column in JOIN result: {identifier}")
+
+    def _matches_where_join(self, row: Dict[str, Any], where: WhereClause) -> bool:
+        for group in where.groups:
+            group_matches = True
+            for col_name, op, raw_value in group:
+                key = col_name if col_name in row else self._resolve_unqualified_join_where_key(col_name, row)
+                left = row.get(key)
+
+                if op == "IS NULL":
+                    if left is not None:
+                        group_matches = False
+                        break
+                    continue
+                if op == "IS NOT NULL":
+                    if left is None:
+                        group_matches = False
+                        break
+                    continue
+                if op == "IN":
+                    if not isinstance(raw_value, list) or left not in raw_value:
+                        group_matches = False
+                        break
+                    continue
+                if op == "NOT IN":
+                    if not isinstance(raw_value, list) or left in raw_value:
+                        group_matches = False
+                        break
+                    continue
+                if op == "LIKE":
+                    if left is None or not isinstance(raw_value, str):
+                        group_matches = False
+                        break
+                    pattern = "^" + re.escape(raw_value).replace(r"%", ".*").replace(r"_", ".") + "$"
+                    if re.match(pattern, str(left)) is None:
+                        group_matches = False
+                        break
+                    continue
+                if not self._compare(left, op, raw_value):
+                    group_matches = False
+                    break
+            if group_matches:
+                return True
+        return False
+
+    def _resolve_unqualified_join_where_key(self, identifier: str, row: Dict[str, Any]) -> str:
+        matches = [key for key in row.keys() if key.endswith(f".{identifier}")]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous column in JOIN WHERE: {identifier}")
+        raise ValueError(f"Unknown column in JOIN WHERE: {identifier}")

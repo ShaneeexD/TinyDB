@@ -30,20 +30,26 @@ SQL_KEYWORDS = {
     "COMMIT",
     "CREATE",
     "DELETE",
+    "DEFAULT",
     "DESCRIBE",
     "DROP",
     "DESC",
     "FALSE",
     "FROM",
+    "IS",
     "IN",
+    "INDEX",
     "INSERT",
     "INTO",
+    "JOIN",
     "KEY",
+    "LIKE",
     "LIMIT",
     "NOT",
     "NULL",
     "OR",
     "ORDER",
+    "ON",
     "PRIMARY",
     "REMOVE",
     "RENAME",
@@ -55,12 +61,13 @@ SQL_KEYWORDS = {
     "TABLES",
     "TO",
     "TRUE",
+    "UNIQUE",
     "UPDATE",
     "VALUES",
     "WHERE",
 }
 
-SQL_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN", "TIMESTAMP"}
+SQL_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN", "TIMESTAMP", "BLOB", "DECIMAL", "NUMERIC"}
 
 CLAUDE_MODEL = "claude-3-haiku-20240307"
 AI_SAMPLE_ROW_LIMIT = 3
@@ -75,7 +82,7 @@ Use only syntax supported by tinydb_engine:
 - CREATE TABLE
 - FOREIGN KEY (col) REFERENCES other_table(other_col) inside CREATE TABLE
 - INSERT INTO ... VALUES (...) or INSERT INTO ... VALUES (...), (...)
-- SELECT ... [WHERE] [ORDER BY] [LIMIT]
+- SELECT ... [JOIN ... ON ...] [WHERE] [ORDER BY] [LIMIT]
 - UPDATE ... SET ... [WHERE]
 - DELETE FROM ... [WHERE]
 - DROP TABLE ...
@@ -83,14 +90,17 @@ Use only syntax supported by tinydb_engine:
 - ALTER TABLE ... RENAME COLUMN ... TO ...
 - ALTER TABLE ... ADD COLUMN ...
 - ALTER TABLE ... REMOVE COLUMN ...
+- CREATE INDEX ... ON table_name(column_name)
 - SHOW TABLES
 - DESCRIBE table_name
 - BEGIN / COMMIT / ROLLBACK
 
 Important limitations:
-- Available SQL column types: INTEGER, TEXT, REAL, BOOLEAN, TIMESTAMP.
+- Available SQL column types: INTEGER, TEXT, REAL, BOOLEAN, TIMESTAMP, BLOB, DECIMAL (NUMERIC alias).
 - TIMESTAMP values should be string literals (example: '2023-04-01 12:34:56').
-- WHERE supports AND/OR predicates and IN (...).
+- WHERE supports AND/OR predicates, IN (...), NOT IN (...), LIKE, IS NULL, IS NOT NULL.
+- JOIN support is currently one INNER JOIN per SELECT.
+- CREATE INDEX currently supports UNIQUE columns.
 - ALTER TABLE ADD COLUMN supports nullable non-PK columns only.
 - ALTER TABLE REMOVE COLUMN supports only removing the last non-PK column.
 - Identifiers must match schema names exactly (e.g. player_id, not "player id").
@@ -161,8 +171,7 @@ def _to_sql_literal(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     text = str(value)
-    if "'" in text:
-        raise ValueError("Single quotes are not yet supported in edited TEXT values")
+    text = text.replace("'", "''")
     return f"'{text}'"
 
 

@@ -13,6 +13,8 @@ class ColumnDef:
     data_type: str
     primary_key: bool = False
     not_null: bool = False
+    unique: bool = False
+    default_value: Any = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,9 @@ class InsertStmt:
 class SelectStmt:
     table_name: str
     columns: Sequence[str]
+    join_table: Optional[str] = None
+    join_left_column: Optional[str] = None
+    join_right_column: Optional[str] = None
     where: Optional[WhereClause] = None
     order_by: Optional[Tuple[str, str]] = None
     limit: Optional[int] = None
@@ -60,6 +65,13 @@ class DeleteStmt:
 @dataclass(frozen=True)
 class DropTableStmt:
     table_name: str
+
+
+@dataclass(frozen=True)
+class CreateIndexStmt:
+    index_name: str
+    table_name: str
+    column_name: str
 
 
 @dataclass(frozen=True)
@@ -119,6 +131,7 @@ Statement = (
     | UpdateStmt
     | DeleteStmt
     | DropTableStmt
+    | CreateIndexStmt
     | AlterTableRenameStmt
     | AlterTableRenameColumnStmt
     | AlterTableAddColumnStmt

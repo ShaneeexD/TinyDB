@@ -40,6 +40,118 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_select_inner_join_basic(tmp_path):
+    db_path = tmp_path / "crud_join_basic.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("CREATE TABLE games (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, coin_side TEXT NOT NULL)") == "OK"
+
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Bob')") == "OK"
+        assert db.execute("INSERT INTO games VALUES (10, 1, 'heads')") == "OK"
+        assert db.execute("INSERT INTO games VALUES (11, 2, 'tails')") == "OK"
+
+        rows = db.execute(
+            "SELECT users.name, games.coin_side "
+            "FROM users JOIN games ON users.id = games.user_id "
+            "ORDER BY users.name ASC"
+        )
+        assert rows == [
+            {"users.name": "Alice", "games.coin_side": "heads"},
+            {"users.name": "Bob", "games.coin_side": "tails"},
+        ]
+    finally:
+        db.close()
+
+
+def test_select_inner_join_with_where_and_limit(tmp_path):
+    db_path = tmp_path / "crud_join_where_limit.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("CREATE TABLE games (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, coin_side TEXT NOT NULL)") == "OK"
+
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Bob')") == "OK"
+        assert db.execute("INSERT INTO games VALUES (10, 1, 'heads')") == "OK"
+        assert db.execute("INSERT INTO games VALUES (11, 1, 'tails')") == "OK"
+        assert db.execute("INSERT INTO games VALUES (12, 2, 'heads')") == "OK"
+
+        rows = db.execute(
+            "SELECT users.name, games.coin_side "
+            "FROM users JOIN games ON users.id = games.user_id "
+            "WHERE users.name = 'Alice' "
+            "ORDER BY games.id DESC LIMIT 1"
+        )
+        assert rows == [{"users.name": "Alice", "games.coin_side": "tails"}]
+    finally:
+        db.close()
+
+
+def test_where_like_support(tmp_path):
+    db_path = tmp_path / "crud_where_like.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Alicia')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (3, 'Bob')") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE name LIKE 'Ali%' ORDER BY id ASC")
+        assert rows == [{"id": 1}, {"id": 2}]
+
+        rows = db.execute("SELECT id FROM users WHERE name LIKE 'A_i_e' ORDER BY id ASC")
+        assert rows == [{"id": 1}]
+    finally:
+        db.close()
+
+
+def test_where_not_in_support(tmp_path):
+    db_path = tmp_path / "crud_where_not_in.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Bob')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (3, 'Cara')") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE id NOT IN (2, 3) ORDER BY id ASC")
+        assert rows == [{"id": 1}]
+    finally:
+        db.close()
+
+
+def test_where_is_null_and_is_not_null(tmp_path):
+    db_path = tmp_path / "crud_where_is_null.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score REAL)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice', 9.5)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, NULL, NULL)") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE name IS NULL ORDER BY id ASC")
+        assert rows == [{"id": 2}]
+
+        rows = db.execute("SELECT id FROM users WHERE score IS NOT NULL ORDER BY id ASC")
+        assert rows == [{"id": 1}]
+    finally:
+        db.close()
+
+
+def test_string_literal_escaped_single_quote(tmp_path):
+    db_path = tmp_path / "crud_escaped_quote.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'O''Brien')") == "OK"
+
+        rows = db.execute("SELECT name FROM users WHERE id = 1")
+        assert rows == [{"name": "O'Brien"}]
+    finally:
+        db.close()
+
+
 def test_where_or_and_in_support(tmp_path):
     db_path = tmp_path / "crud_where_or_in.db"
     db = TinyDB(str(db_path))

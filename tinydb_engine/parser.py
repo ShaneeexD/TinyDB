@@ -11,6 +11,7 @@ from .ast_nodes import (
     BeginStmt,
     ColumnDef,
     CommitStmt,
+    CreateIndexStmt,
     CreateTableStmt,
     DeleteStmt,
     DescribeTableStmt,
@@ -25,7 +26,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>]|\bAND\b|\bOR\b|\bIN\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'[^']*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -63,6 +64,13 @@ class TokenStream:
             self.pos += 1
             return True
         return False
+
+
+def _parse_identifier(stream: TokenStream) -> str:
+    ident = stream.pop()
+    if stream.consume("."):
+        ident = f"{ident}.{stream.pop()}"
+    return ident
 
 
 def tokenize(sql: str) -> List[str]:
@@ -132,8 +140,18 @@ def parse(sql: str) -> Statement:
     raise ParseError(f"Unsupported command: {keyword}")
 
 
-def _parse_create(stream: TokenStream) -> CreateTableStmt:
+def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
     stream.expect("CREATE")
+    if stream.consume("INDEX"):
+        index_name = stream.pop()
+        stream.expect("ON")
+        table_name = stream.pop()
+        stream.expect("(")
+        column_name = stream.pop()
+        stream.expect(")")
+        _assert_consumed(stream)
+        return CreateIndexStmt(index_name=index_name, table_name=table_name, column_name=column_name)
+
     stream.expect("TABLE")
     table_name = stream.pop()
     stream.expect("(")
@@ -157,19 +175,33 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt:
             col_type = stream.pop().upper()
             primary_key = False
             not_null = False
-            if stream.consume("PRIMARY"):
-                stream.expect("KEY")
-                primary_key = True
-                not_null = True
-            if stream.consume("NOT"):
-                stream.expect("NULL")
-                not_null = True
+            unique = False
+            default_value: Any = None
+            while True:
+                if stream.consume("PRIMARY"):
+                    stream.expect("KEY")
+                    primary_key = True
+                    not_null = True
+                    continue
+                if stream.consume("NOT"):
+                    stream.expect("NULL")
+                    not_null = True
+                    continue
+                if stream.consume("UNIQUE"):
+                    unique = True
+                    continue
+                if stream.consume("DEFAULT"):
+                    default_value = _parse_literal(stream.pop())
+                    continue
+                break
             columns.append(
                 ColumnDef(
                     name=col_name,
                     data_type=col_type,
                     primary_key=primary_key,
                     not_null=not_null,
+                    unique=unique,
+                    default_value=default_value,
                 )
             )
 
@@ -225,20 +257,30 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
         columns = ["*"]
     else:
         while True:
-            columns.append(stream.pop())
+            columns.append(_parse_identifier(stream))
             if stream.consume(","):
                 continue
             break
 
     stream.expect("FROM")
-    table_name = stream.pop()
+    table_name = _parse_identifier(stream)
+
+    join_table = None
+    join_left_column = None
+    join_right_column = None
+    if stream.consume("JOIN"):
+        join_table = _parse_identifier(stream)
+        stream.expect("ON")
+        join_left_column = _parse_identifier(stream)
+        stream.expect("=")
+        join_right_column = _parse_identifier(stream)
 
     where = _parse_where(stream)
 
     order_by = None
     if stream.consume("ORDER"):
         stream.expect("BY")
-        col = stream.pop()
+        col = _parse_identifier(stream)
         direction = "ASC"
         next_tok = stream.peek()
         if next_tok and next_tok.upper() in {"ASC", "DESC"}:
@@ -253,6 +295,9 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     return SelectStmt(
         table_name=table_name,
         columns=columns,
+        join_table=join_table,
+        join_left_column=join_left_column,
+        join_right_column=join_right_column,
         where=where,
         order_by=order_by,
         limit=limit,
@@ -326,13 +371,25 @@ def _parse_alter(
         col_type = stream.pop().upper()
         primary_key = False
         not_null = False
-        if stream.consume("PRIMARY"):
-            stream.expect("KEY")
-            primary_key = True
-            not_null = True
-        if stream.consume("NOT"):
-            stream.expect("NULL")
-            not_null = True
+        unique = False
+        default_value: Any = None
+        while True:
+            if stream.consume("PRIMARY"):
+                stream.expect("KEY")
+                primary_key = True
+                not_null = True
+                continue
+            if stream.consume("NOT"):
+                stream.expect("NULL")
+                not_null = True
+                continue
+            if stream.consume("UNIQUE"):
+                unique = True
+                continue
+            if stream.consume("DEFAULT"):
+                default_value = _parse_literal(stream.pop())
+                continue
+            break
         _assert_consumed(stream)
         return AlterTableAddColumnStmt(
             table_name=table_name,
@@ -341,6 +398,8 @@ def _parse_alter(
                 data_type=col_type,
                 primary_key=primary_key,
                 not_null=not_null,
+                unique=unique,
+                default_value=default_value,
             ),
         )
 
@@ -360,10 +419,17 @@ def _parse_where(stream: TokenStream) -> WhereClause | None:
     groups: List[List[Tuple[str, str, Any]]] = []
     current_group: List[Tuple[str, str, Any]] = []
     while True:
-        col = stream.pop()
+        col = _parse_identifier(stream)
         op = stream.pop().upper()
 
-        if op == "IN":
+        if op == "IS":
+            if stream.consume("NOT"):
+                stream.expect("NULL")
+                current_group.append((col, "IS NOT NULL", None))
+            else:
+                stream.expect("NULL")
+                current_group.append((col, "IS NULL", None))
+        elif op == "IN":
             stream.expect("(")
             values: List[Any] = []
             while True:
@@ -373,6 +439,20 @@ def _parse_where(stream: TokenStream) -> WhereClause | None:
                 stream.expect(")")
                 break
             current_group.append((col, "IN", values))
+        elif op == "NOT":
+            stream.expect("IN")
+            stream.expect("(")
+            values = []
+            while True:
+                values.append(_parse_literal(stream.pop()))
+                if stream.consume(","):
+                    continue
+                stream.expect(")")
+                break
+            current_group.append((col, "NOT IN", values))
+        elif op == "LIKE":
+            value = _parse_literal(stream.pop())
+            current_group.append((col, "LIKE", value))
         else:
             if op not in {"=", "!=", "<", "<=", ">", ">="}:
                 raise ParseError(f"Unsupported operator: {op}")
@@ -400,7 +480,7 @@ def _parse_literal(token: str) -> Any:
     if upper == "FALSE":
         return False
     if token.startswith("'") and token.endswith("'"):
-        return token[1:-1]
+        return token[1:-1].replace("''", "'")
     if re.fullmatch(r"\d+\.\d+", token):
         return float(token)
     if re.fullmatch(r"\d+", token):

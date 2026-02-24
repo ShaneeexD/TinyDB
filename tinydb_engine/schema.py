@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 
-SUPPORTED_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN", "TIMESTAMP"}
+SUPPORTED_TYPES = {"INTEGER", "TEXT", "REAL", "BOOLEAN", "TIMESTAMP", "BLOB", "DECIMAL", "NUMERIC"}
 
 
 @dataclass
@@ -13,6 +14,8 @@ class ColumnSchema:
     data_type: str
     primary_key: bool = False
     not_null: bool = False
+    unique: bool = False
+    default_value: Any = None
 
 
 @dataclass
@@ -22,6 +25,7 @@ class TableSchema:
     data_page_ids: List[int]
     pk_index_root_page: int
     foreign_keys: List[dict[str, str]] | None = None
+    secondary_indexes: List[dict[str, Any]] | None = None
 
     @property
     def pk_column(self) -> Optional[ColumnSchema]:
@@ -39,6 +43,8 @@ class TableSchema:
 
 def normalize_type(type_name: str) -> str:
     normalized = type_name.upper()
+    if normalized == "NUMERIC":
+        normalized = "DECIMAL"
     if normalized not in SUPPORTED_TYPES:
         raise ValueError(f"Unsupported type: {type_name}")
     return normalized
@@ -57,6 +63,20 @@ def coerce_value(value: Any, data_type: str) -> Any:
         return str(value)
     if data_type == "TIMESTAMP":
         return str(value)
+    if data_type == "BLOB":
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, bytearray):
+            return bytes(value)
+        if isinstance(value, str):
+            return value.encode("utf-8")
+        raise ValueError(f"Cannot coerce '{value}' to BLOB")
+    if data_type == "DECIMAL":
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, bool):
+            return Decimal(int(value))
+        return Decimal(str(value))
     if data_type == "BOOLEAN":
         if isinstance(value, bool):
             return value
@@ -81,12 +101,15 @@ def serialize_schema_map(schema_map: Dict[str, TableSchema]) -> Dict[str, Any]:
                     "data_type": col.data_type,
                     "primary_key": col.primary_key,
                     "not_null": col.not_null,
+                    "unique": col.unique,
+                    "default_value": col.default_value,
                 }
                 for col in schema.columns
             ],
             "data_page_ids": schema.data_page_ids,
             "pk_index_root_page": schema.pk_index_root_page,
             "foreign_keys": list(schema.foreign_keys or []),
+            "secondary_indexes": list(schema.secondary_indexes or []),
         }
         for name, schema in schema_map.items()
     }
@@ -101,5 +124,6 @@ def deserialize_schema_map(payload: Dict[str, Any]) -> Dict[str, TableSchema]:
             data_page_ids=list(table["data_page_ids"]),
             pk_index_root_page=int(table["pk_index_root_page"]),
             foreign_keys=[dict(item) for item in table.get("foreign_keys", [])],
+            secondary_indexes=[dict(item) for item in table.get("secondary_indexes", [])],
         )
     return output

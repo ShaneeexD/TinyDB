@@ -22,6 +22,21 @@ def test_explicit_transaction_commit(tmp_path):
         db.close()
 
 
+def test_execute_with_params_escapes_single_quotes(tmp_path):
+    db = TinyDB(str(tmp_path / "params_quotes.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+        assert db.execute(
+            "INSERT INTO users VALUES (?, ?)",
+            params=[1, "O'Brien"],
+        ) == "OK"
+
+        rows = db.execute("SELECT name FROM users WHERE id = ?", params=[1])
+        assert rows == [{"name": "O'Brien"}]
+    finally:
+        db.close()
+
+
 def test_explicit_transaction_rollback(tmp_path):
     db = TinyDB(str(tmp_path / "tx_rollback.db"))
     try:

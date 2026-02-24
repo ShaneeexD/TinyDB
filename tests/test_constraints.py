@@ -21,6 +21,41 @@ def test_duplicate_primary_key_rejected(tmp_path):
         db.close()
 
 
+def test_unique_constraint_enforced_on_insert_and_update(tmp_path):
+    db = TinyDB(str(tmp_path / "unique.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE)")
+        db.execute("INSERT INTO users VALUES (1, 'alice@example.com')")
+        db.execute("INSERT INTO users VALUES (2, 'bob@example.com')")
+
+        with pytest.raises(ValueError, match="UNIQUE constraint failed"):
+            db.execute("INSERT INTO users VALUES (3, 'alice@example.com')")
+
+        with pytest.raises(ValueError, match="UNIQUE constraint failed"):
+            db.execute("UPDATE users SET email = 'alice@example.com' WHERE id = 2")
+    finally:
+        db.close()
+
+
+def test_default_value_on_create_and_alter_add_column(tmp_path):
+    db = TinyDB(str(tmp_path / "defaults.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT DEFAULT 'player', active BOOLEAN DEFAULT TRUE)")
+        db.execute("INSERT INTO users (id) VALUES (1)")
+        rows = db.execute("SELECT role, active FROM users WHERE id = 1")
+        assert rows == [{"role": "player", "active": True}]
+
+        db.execute("ALTER TABLE users ADD COLUMN region TEXT DEFAULT 'NA'")
+        rows = db.execute("SELECT region FROM users WHERE id = 1")
+        assert rows == [{"region": "NA"}]
+
+        db.execute("INSERT INTO users (id, role) VALUES (2, 'admin')")
+        rows = db.execute("SELECT role, active, region FROM users WHERE id = 2")
+        assert rows == [{"role": "admin", "active": True, "region": "NA"}]
+    finally:
+        db.close()
+
+
 def test_foreign_key_references_enforced_on_insert(tmp_path):
     db = TinyDB(str(tmp_path / "fk_insert.db"))
     try:

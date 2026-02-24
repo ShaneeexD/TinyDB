@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Sequence
 
 from tinydb_engine.ast_nodes import BeginStmt, CommitStmt, RollbackStmt
@@ -58,18 +59,27 @@ class TinyDB:
         pieces: list[str] = []
         param_idx = 0
         in_string = False
-        for ch in sql:
+        i = 0
+        while i < len(sql):
+            ch = sql[i]
             if ch == "'":
+                if in_string and i + 1 < len(sql) and sql[i + 1] == "'":
+                    pieces.append("''")
+                    i += 2
+                    continue
                 in_string = not in_string
                 pieces.append(ch)
+                i += 1
                 continue
             if ch == "?" and not in_string:
                 if param_idx >= len(params):
                     raise ValueError("Not enough parameters for SQL placeholders")
                 pieces.append(self._to_sql_literal(params[param_idx]))
                 param_idx += 1
+                i += 1
                 continue
             pieces.append(ch)
+            i += 1
 
         if param_idx != len(params):
             raise ValueError("Too many parameters for SQL placeholders")
@@ -80,12 +90,17 @@ class TinyDB:
             return "NULL"
         if isinstance(value, bool):
             return "TRUE" if value else "FALSE"
+        if isinstance(value, Decimal):
+            return f"'{str(value)}'"
+        if isinstance(value, (bytes, bytearray)):
+            text = bytes(value).decode("utf-8")
+            text = text.replace("'", "''")
+            return f"'{text}'"
         if isinstance(value, (int, float)):
             return str(value)
 
         text = str(value)
-        if "'" in text:
-            raise ValueError("Single quotes are not supported in parameterized TEXT values")
+        text = text.replace("'", "''")
         return f"'{text}'"
 
     def create_user(self, username: str, password: str, table_name: str = "users") -> str:
