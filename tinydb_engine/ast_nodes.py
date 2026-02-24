@@ -45,10 +45,19 @@ class SelectStmt:
     join_table: Optional[str] = None
     join_left_column: Optional[str] = None
     join_right_column: Optional[str] = None
+    joins: Optional[Sequence["JoinClause"]] = None
     where: Optional[WhereClause] = None
     group_by: Optional[Sequence[str]] = None
     order_by: Optional[Tuple[str, str]] = None
     limit: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class JoinClause:
+    join_type: str
+    table_name: str
+    left_column: str
+    right_column: str
 
 
 @dataclass(frozen=True)

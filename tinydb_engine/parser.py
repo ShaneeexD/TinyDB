@@ -19,6 +19,7 @@ from .ast_nodes import (
     DropTableStmt,
     ExplainStmt,
     InsertStmt,
+    JoinClause,
     RollbackStmt,
     SelectStmt,
     ShowIndexesStmt,
@@ -298,24 +299,30 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     stream.expect("FROM")
     table_name = _parse_identifier(stream)
 
-    join_type = "INNER"
-    join_table = None
-    join_left_column = None
-    join_right_column = None
-    if stream.consume("LEFT"):
-        join_type = "LEFT"
-        stream.expect("JOIN")
+    joins: List[JoinClause] = []
+    while True:
+        join_type = "INNER"
+        if stream.consume("LEFT"):
+            join_type = "LEFT"
+            stream.expect("JOIN")
+        elif stream.consume("JOIN"):
+            join_type = "INNER"
+        else:
+            break
+
         join_table = _parse_identifier(stream)
         stream.expect("ON")
         join_left_column = _parse_identifier(stream)
         stream.expect("=")
         join_right_column = _parse_identifier(stream)
-    elif stream.consume("JOIN"):
-        join_table = _parse_identifier(stream)
-        stream.expect("ON")
-        join_left_column = _parse_identifier(stream)
-        stream.expect("=")
-        join_right_column = _parse_identifier(stream)
+        joins.append(
+            JoinClause(
+                join_type=join_type,
+                table_name=join_table,
+                left_column=join_left_column,
+                right_column=join_right_column,
+            )
+        )
 
     where = _parse_where(stream)
 
@@ -347,10 +354,11 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     return SelectStmt(
         table_name=table_name,
         columns=columns,
-        join_type=join_type,
-        join_table=join_table,
-        join_left_column=join_left_column,
-        join_right_column=join_right_column,
+        join_type=joins[0].join_type if joins else "INNER",
+        join_table=joins[0].table_name if joins else None,
+        join_left_column=joins[0].left_column if joins else None,
+        join_right_column=joins[0].right_column if joins else None,
+        joins=joins or None,
         where=where,
         group_by=group_by,
         order_by=order_by,

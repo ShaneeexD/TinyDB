@@ -437,58 +437,86 @@ class Executor:
         return out
 
     def _select_with_join(self, stmt: SelectStmt) -> List[Dict[str, Any]]:
-        if stmt.join_table is None or stmt.join_left_column is None or stmt.join_right_column is None:
-            raise ValueError("JOIN requires table and ON columns")
+        join_clauses = list(stmt.joins or [])
+        if not join_clauses:
+            if stmt.join_table is None or stmt.join_left_column is None or stmt.join_right_column is None:
+                raise ValueError("JOIN requires table and ON columns")
+            join_clauses = [
+                {
+                    "join_type": stmt.join_type,
+                    "table_name": stmt.join_table,
+                    "left_column": stmt.join_left_column,
+                    "right_column": stmt.join_right_column,
+                }
+            ]
+
         if stmt.columns == ["*"]:
             raise ValueError("SELECT * is not supported with JOIN; explicitly select columns")
 
-        left_schema = self._schema(stmt.table_name)
-        right_schema = self._schema(stmt.join_table)
-
-        left_rows = self._scan_rows(left_schema)
-        right_rows = self._scan_rows(right_schema)
-
-        left_on = self._join_column_name(left_schema, stmt.table_name, stmt.join_left_column)
-        right_on = self._join_column_name(right_schema, stmt.join_table, stmt.join_right_column)
-        left_on_idx = left_schema.column_index(left_on)
-        right_on_idx = right_schema.column_index(right_on)
-
-        joined: List[Dict[str, Any]] = []
-        for left_row in left_rows:
-            left_value = left_row["values"][left_on_idx]
-            matched = False
-            for right_row in right_rows:
-                if left_value != right_row["values"][right_on_idx]:
-                    continue
-                matched = True
-                merged = self._merge_join_row(
+        base_schema = self._schema(stmt.table_name)
+        current_rows: List[Dict[str, Any]] = []
+        for row in self._scan_rows(base_schema):
+            current_rows.append(
+                self._merge_join_row(
                     stmt.table_name,
-                    left_schema,
-                    left_row["values"],
-                    stmt.join_table,
-                    right_schema,
-                    right_row["values"],
+                    base_schema,
+                    row["values"],
+                    None,
+                    None,
+                    None,
                 )
-                if stmt.where and not self._matches_where_join(merged, stmt.where):
-                    continue
-                joined.append(merged)
-            if stmt.join_type.upper() == "LEFT" and not matched:
-                merged = self._merge_join_row(
-                    stmt.table_name,
-                    left_schema,
-                    left_row["values"],
-                    stmt.join_table,
-                    right_schema,
-                    [None] * len(right_schema.columns),
-                )
-                if stmt.where and not self._matches_where_join(merged, stmt.where):
-                    continue
-                joined.append(merged)
+            )
+
+        all_schemas: Dict[str, TableSchema] = {stmt.table_name: base_schema}
+        for clause in join_clauses:
+            if isinstance(clause, dict):
+                join_type = str(clause["join_type"]).upper()
+                right_table = str(clause["table_name"])
+                left_ref = str(clause["left_column"])
+                right_ref = str(clause["right_column"])
+            else:
+                join_type = str(clause.join_type).upper()
+                right_table = str(clause.table_name)
+                left_ref = str(clause.left_column)
+                right_ref = str(clause.right_column)
+            right_schema = self._schema(right_table)
+            all_schemas[right_table] = right_schema
+
+            right_on = self._join_column_name(right_schema, right_table, right_ref)
+            right_on_idx = right_schema.column_index(right_on)
+
+            right_rows = self._scan_rows(right_schema)
+            next_rows: List[Dict[str, Any]] = []
+            for current in current_rows:
+                left_value = self._value_from_join_row(current, left_ref)
+                candidates = self._join_right_candidates(right_schema, right_rows, right_on_idx, left_value)
+                matched = False
+                for right_row in candidates:
+                    if left_value != right_row["values"][right_on_idx]:
+                        continue
+                    matched = True
+                    merged = dict(current)
+                    for idx, col in enumerate(right_schema.columns):
+                        merged[f"{right_table}.{col.name}"] = right_row["values"][idx]
+                    next_rows.append(merged)
+
+                if join_type == "LEFT" and not matched:
+                    merged = dict(current)
+                    for col in right_schema.columns:
+                        merged[f"{right_table}.{col.name}"] = None
+                    next_rows.append(merged)
+
+            current_rows = next_rows
+
+        joined = current_rows
+
+        if stmt.where:
+            joined = [row for row in joined if self._matches_where_join(row, stmt.where)]
 
         if stmt.order_by:
             col, direction = stmt.order_by
             reverse = direction.upper() == "DESC"
-            order_key = self._resolve_join_column_key(col, stmt.table_name, left_schema, stmt.join_table, right_schema)
+            order_key = self._resolve_join_column_key_multi(col, all_schemas)
             joined.sort(key=lambda r: (r.get(order_key) is None, r.get(order_key)), reverse=reverse)
 
         if stmt.limit is not None:
@@ -498,7 +526,7 @@ class Executor:
         for row in joined:
             out_row: Dict[str, Any] = {}
             for col in stmt.columns:
-                key = self._resolve_join_column_key(col, stmt.table_name, left_schema, stmt.join_table, right_schema)
+                key = self._resolve_join_column_key_multi(col, all_schemas)
                 out_row[col] = row.get(key)
             out.append(out_row)
         return out
@@ -988,16 +1016,75 @@ class Executor:
         left_table: str,
         left_schema: TableSchema,
         left_values: List[Any],
-        right_table: str,
-        right_schema: TableSchema,
-        right_values: List[Any],
+        right_table: str | None,
+        right_schema: TableSchema | None,
+        right_values: List[Any] | None,
     ) -> Dict[str, Any]:
         merged: Dict[str, Any] = {}
         for idx, col in enumerate(left_schema.columns):
             merged[f"{left_table}.{col.name}"] = left_values[idx]
-        for idx, col in enumerate(right_schema.columns):
-            merged[f"{right_table}.{col.name}"] = right_values[idx]
+        if right_table is not None and right_schema is not None and right_values is not None:
+            for idx, col in enumerate(right_schema.columns):
+                merged[f"{right_table}.{col.name}"] = right_values[idx]
         return merged
+
+    def _resolve_join_column_key_multi(self, identifier: str, schemas: Dict[str, TableSchema]) -> str:
+        if "." in identifier:
+            table, col = identifier.split(".", 1)
+            schema = self._schema_by_name(schemas, table)
+            schema.column_index(col)
+            return f"{schema.name}.{col}"
+
+        matches: List[str] = []
+        for table_name, schema in schemas.items():
+            if any(col.name.lower() == identifier.lower() for col in schema.columns):
+                matches.append(f"{table_name}.{identifier}")
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous column in JOIN result: {identifier}")
+        raise ValueError(f"Unknown column in JOIN result: {identifier}")
+
+    def _schema_by_name(self, schemas: Dict[str, TableSchema], table_name: str) -> TableSchema:
+        for key, schema in schemas.items():
+            if key.lower() == table_name.lower() or schema.name.lower() == table_name.lower():
+                return schema
+        raise ValueError(f"Unknown table in JOIN context: {table_name}")
+
+    def _value_from_join_row(self, row: Dict[str, Any], identifier: str) -> Any:
+        if identifier in row:
+            return row[identifier]
+        if "." not in identifier:
+            key = self._resolve_unqualified_join_where_key(identifier, row)
+            return row.get(key)
+        table, col = identifier.split(".", 1)
+        for key in row:
+            if key.lower() == f"{table}.{col}".lower():
+                return row[key]
+        raise ValueError(f"Unknown join reference: {identifier}")
+
+    def _join_right_candidates(
+        self,
+        right_schema: TableSchema,
+        right_rows: List[Dict[str, Any]],
+        right_on_idx: int,
+        left_value: Any,
+    ) -> List[Dict[str, Any]]:
+        if left_value is None:
+            return []
+        col_name = right_schema.columns[right_on_idx].name
+        idx_meta = next((i for i in (right_schema.secondary_indexes or []) if i["column"].lower() == col_name.lower()), None)
+        if idx_meta is None:
+            return right_rows
+
+        btree = BTreeIndex(self.pager, int(idx_meta["root_page"]))
+        out: List[Dict[str, Any]] = []
+        for page_id, slot_id in btree.find_all(left_value):
+            row_values = self._read_row_at(right_schema, page_id, slot_id)
+            if row_values is None:
+                continue
+            out.append({"page_id": page_id, "slot_id": slot_id, "values": row_values})
+        return out
 
     def _resolve_join_column_key(
         self,
