@@ -15,10 +15,13 @@ from .ast_nodes import (
     CreateTableStmt,
     DeleteStmt,
     DescribeTableStmt,
+    DropIndexStmt,
     DropTableStmt,
+    ExplainStmt,
     InsertStmt,
     RollbackStmt,
     SelectStmt,
+    ShowIndexesStmt,
     ShowTablesStmt,
     Statement,
     UpdateStmt,
@@ -26,7 +29,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -71,6 +74,25 @@ def _parse_identifier(stream: TokenStream) -> str:
     if stream.consume("."):
         ident = f"{ident}.{stream.pop()}"
     return ident
+
+
+def _parse_select_expression(stream: TokenStream) -> str:
+    token = stream.pop()
+    if stream.peek() != "(":
+        if stream.consume("."):
+            token = f"{token}.{stream.pop()}"
+        return token
+
+    expr_parts = [token, stream.pop()]
+    depth = 1
+    while depth > 0:
+        part = stream.pop()
+        if part == "(":
+            depth += 1
+        elif part == ")":
+            depth -= 1
+        expr_parts.append(part)
+    return "".join(expr_parts)
 
 
 def tokenize(sql: str) -> List[str]:
@@ -129,9 +151,20 @@ def parse(sql: str) -> Statement:
         return RollbackStmt()
     if keyword == "SHOW":
         stream.pop()
-        stream.expect("TABLES")
-        _assert_consumed(stream)
-        return ShowTablesStmt()
+        if stream.consume("TABLES"):
+            _assert_consumed(stream)
+            return ShowTablesStmt()
+        if stream.consume("INDEXES"):
+            table_name = stream.pop() if stream.peek() is not None else None
+            _assert_consumed(stream)
+            return ShowIndexesStmt(table_name=table_name)
+        raise ParseError("Expected TABLES or INDEXES after SHOW")
+    if keyword == "EXPLAIN":
+        stream.pop()
+        rest = " ".join(stream.tokens[stream.pos :])
+        if not rest.strip():
+            raise ParseError("EXPLAIN requires a statement")
+        return ExplainStmt(statement=parse(rest))
     if keyword == "DESCRIBE":
         stream.pop()
         table_name = stream.pop()
@@ -257,7 +290,7 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
         columns = ["*"]
     else:
         while True:
-            columns.append(_parse_identifier(stream))
+            columns.append(_parse_select_expression(stream))
             if stream.consume(","):
                 continue
             break
@@ -265,10 +298,19 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     stream.expect("FROM")
     table_name = _parse_identifier(stream)
 
+    join_type = "INNER"
     join_table = None
     join_left_column = None
     join_right_column = None
-    if stream.consume("JOIN"):
+    if stream.consume("LEFT"):
+        join_type = "LEFT"
+        stream.expect("JOIN")
+        join_table = _parse_identifier(stream)
+        stream.expect("ON")
+        join_left_column = _parse_identifier(stream)
+        stream.expect("=")
+        join_right_column = _parse_identifier(stream)
+    elif stream.consume("JOIN"):
         join_table = _parse_identifier(stream)
         stream.expect("ON")
         join_left_column = _parse_identifier(stream)
@@ -276,6 +318,16 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
         join_right_column = _parse_identifier(stream)
 
     where = _parse_where(stream)
+
+    group_by: List[str] | None = None
+    if stream.consume("GROUP"):
+        stream.expect("BY")
+        group_by = []
+        while True:
+            group_by.append(_parse_identifier(stream))
+            if stream.consume(","):
+                continue
+            break
 
     order_by = None
     if stream.consume("ORDER"):
@@ -295,10 +347,12 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     return SelectStmt(
         table_name=table_name,
         columns=columns,
+        join_type=join_type,
         join_table=join_table,
         join_left_column=join_left_column,
         join_right_column=join_right_column,
         where=where,
+        group_by=group_by,
         order_by=order_by,
         limit=limit,
     )
@@ -335,6 +389,10 @@ def _parse_delete(stream: TokenStream) -> DeleteStmt:
 
 def _parse_drop(stream: TokenStream) -> DropTableStmt:
     stream.expect("DROP")
+    if stream.consume("INDEX"):
+        index_name = stream.pop()
+        _assert_consumed(stream)
+        return DropIndexStmt(index_name=index_name)
     stream.expect("TABLE")
     table_name = stream.pop()
     _assert_consumed(stream)

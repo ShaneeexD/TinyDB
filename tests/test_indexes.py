@@ -43,11 +43,35 @@ def test_index_kept_consistent_on_update_and_delete(tmp_path):
         db.close()
 
 
-def test_create_index_rejects_non_unique_column(tmp_path):
+def test_create_index_allows_non_unique_column(tmp_path):
     db = TinyDB(str(tmp_path / "index_non_unique.db"))
     try:
         db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
-        with pytest.raises(ValueError, match="UNIQUE columns"):
-            db.execute("CREATE INDEX idx_users_name ON users(name)")
+        db.execute("INSERT INTO users VALUES (1, 'Alice')")
+        db.execute("INSERT INTO users VALUES (2, 'Alice')")
+        assert db.execute("CREATE INDEX idx_users_name ON users(name)") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE name = 'Alice' ORDER BY id ASC")
+        assert rows == [{"id": 1}, {"id": 2}]
+    finally:
+        db.close()
+
+
+def test_show_drop_index_and_explain(tmp_path):
+    db = TinyDB(str(tmp_path / "index_ops.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, name TEXT)")
+        db.execute("INSERT INTO users VALUES (1, 'a@example.com', 'Alice')")
+        db.execute("CREATE INDEX idx_users_email ON users(email)")
+
+        rows = db.execute("SHOW INDEXES users")
+        assert rows == [{"index_name": "idx_users_email", "table_name": "users", "column_name": "email"}]
+
+        plan = db.execute("EXPLAIN SELECT id FROM users WHERE email = 'a@example.com'")
+        assert plan == [{"plan": "SECONDARY INDEX LOOKUP"}]
+
+        assert db.execute("DROP INDEX idx_users_email") == "OK"
+        rows = db.execute("SHOW INDEXES users")
+        assert rows == []
     finally:
         db.close()

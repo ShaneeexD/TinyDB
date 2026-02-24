@@ -40,6 +40,48 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_select_left_join_support(tmp_path):
+    db_path = tmp_path / "crud_left_join.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("CREATE TABLE games (id INTEGER PRIMARY KEY, user_id INTEGER, coin_side TEXT)") == "OK"
+
+        db.execute("INSERT INTO users VALUES (1, 'Alice')")
+        db.execute("INSERT INTO users VALUES (2, 'Bob')")
+        db.execute("INSERT INTO games VALUES (10, 1, 'heads')")
+
+        rows = db.execute(
+            "SELECT users.name, games.coin_side "
+            "FROM users LEFT JOIN games ON users.id = games.user_id "
+            "ORDER BY users.id ASC"
+        )
+        assert rows == [
+            {"users.name": "Alice", "games.coin_side": "heads"},
+            {"users.name": "Bob", "games.coin_side": None},
+        ]
+    finally:
+        db.close()
+
+
+def test_group_by_and_aggregates(tmp_path):
+    db_path = tmp_path / "crud_group_by.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE games (id INTEGER PRIMARY KEY, coin_side TEXT, amount REAL)") == "OK"
+        db.execute("INSERT INTO games VALUES (1, 'heads', 5.0)")
+        db.execute("INSERT INTO games VALUES (2, 'heads', 7.5)")
+        db.execute("INSERT INTO games VALUES (3, 'tails', 2.5)")
+
+        rows = db.execute("SELECT coin_side, COUNT(*), SUM(amount) FROM games GROUP BY coin_side ORDER BY coin_side ASC")
+        assert rows == [
+            {"coin_side": "heads", "COUNT(*)": 2, "SUM(amount)": 12.5},
+            {"coin_side": "tails", "COUNT(*)": 1, "SUM(amount)": 2.5},
+        ]
+    finally:
+        db.close()
+
+
 def test_select_inner_join_basic(tmp_path):
     db_path = tmp_path / "crud_join_basic.db"
     db = TinyDB(str(db_path))

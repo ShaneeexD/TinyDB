@@ -13,10 +13,13 @@ from tinydb_engine.ast_nodes import (
     DescribeTableStmt,
     CreateTableStmt,
     DeleteStmt,
+    DropIndexStmt,
     DropTableStmt,
+    ExplainStmt,
     InsertStmt,
     RollbackStmt,
     SelectStmt,
+    ShowIndexesStmt,
     ShowTablesStmt,
     Statement,
     UpdateStmt,
@@ -41,12 +44,18 @@ class Executor:
     def execute(self, statement: Statement) -> Any:
         if isinstance(statement, ShowTablesStmt):
             return self._show_tables()
+        if isinstance(statement, ShowIndexesStmt):
+            return self._show_indexes(statement)
         if isinstance(statement, DescribeTableStmt):
             return self._describe_table(statement)
+        if isinstance(statement, ExplainStmt):
+            return self._explain(statement)
         if isinstance(statement, CreateTableStmt):
             return self._create_table(statement)
         if isinstance(statement, CreateIndexStmt):
             return self._create_index(statement)
+        if isinstance(statement, DropIndexStmt):
+            return self._drop_index(statement)
         if isinstance(statement, AlterTableRenameStmt):
             return self._alter_table_rename(statement)
         if isinstance(statement, AlterTableRenameColumnStmt):
@@ -70,6 +79,38 @@ class Executor:
     def _show_tables(self) -> List[Dict[str, Any]]:
         names = sorted(table.name for table in self.schemas.values())
         return [{"table_name": name} for name in names]
+
+    def _show_indexes(self, stmt: ShowIndexesStmt) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for schema in self.schemas.values():
+            if stmt.table_name is not None and schema.name.lower() != stmt.table_name.lower():
+                continue
+            for idx in schema.secondary_indexes or []:
+                rows.append(
+                    {
+                        "index_name": idx["name"],
+                        "table_name": schema.name,
+                        "column_name": idx["column"],
+                    }
+                )
+        rows.sort(key=lambda r: (r["table_name"].lower(), r["index_name"].lower()))
+        return rows
+
+    def _explain(self, stmt: ExplainStmt) -> List[Dict[str, Any]]:
+        inner = stmt.statement
+        if not isinstance(inner, SelectStmt):
+            return [{"plan": f"FULL EXECUTION ({type(inner).__name__})"}]
+
+        schema = self._schema(inner.table_name)
+        if inner.join_table is not None:
+            return [{"plan": "NESTED LOOP JOIN"}]
+        if self._select_pk_fast_path(schema, inner) is not None:
+            return [{"plan": "PK INDEX LOOKUP"}]
+        if self._select_secondary_index_fast_path(schema, inner) is not None:
+            return [{"plan": "SECONDARY INDEX LOOKUP"}]
+        if inner.order_by and self._can_use_index_for_order(schema, inner.order_by[0]):
+            return [{"plan": "INDEX ORDER SCAN"}]
+        return [{"plan": "FULL TABLE SCAN"}]
 
     def _describe_table(self, stmt: DescribeTableStmt) -> List[Dict[str, Any]]:
         schema = self._schema(stmt.table_name)
@@ -167,6 +208,17 @@ class Executor:
         self.catalog.save(self.schemas)
         return "OK"
 
+    def _drop_index(self, stmt: DropIndexStmt) -> str:
+        for schema in self.schemas.values():
+            indexes = schema.secondary_indexes or []
+            for i, idx in enumerate(indexes):
+                if idx["name"].lower() == stmt.index_name.lower():
+                    del indexes[i]
+                    schema.secondary_indexes = indexes
+                    self.catalog.save(self.schemas)
+                    return "OK"
+        raise ValueError(f"Unknown index: {stmt.index_name}")
+
     def _alter_table_remove_column(self, stmt: AlterTableRemoveColumnStmt) -> str:
         schema = self._schema(stmt.table_name)
         remove_idx = schema.column_index(stmt.column_name)
@@ -195,15 +247,13 @@ class Executor:
 
         col_idx = schema.column_index(stmt.column_name)
         col = schema.columns[col_idx]
-        if not col.unique:
-            raise ValueError("CREATE INDEX currently supports UNIQUE columns only")
 
         btree = BTreeIndex.create(self.pager)
         for row in self._scan_rows(schema):
             value = row["values"][col_idx]
             if value is None:
                 continue
-            btree.insert(value, (row["page_id"], row["slot_id"]))
+            btree.insert_non_unique(value, (row["page_id"], row["slot_id"]))
 
         schema.secondary_indexes.append(
             {
@@ -311,7 +361,7 @@ class Executor:
                 idx_value = values[col_idx]
                 if idx_value is None:
                     continue
-                sec_btree.insert(idx_value, (page_id, slot_id))
+                sec_btree.insert_non_unique(idx_value, (page_id, slot_id))
 
         if pk_idx is not None and btree is not None:
             schema.pk_index_root_page = btree.root_page_id
@@ -331,6 +381,11 @@ class Executor:
             rows = self._select_secondary_index_fast_path(schema, stmt)
         if rows is None:
             rows = self._scan_rows(schema)
+        elif stmt.order_by and self._can_use_index_for_order(schema, stmt.order_by[0]):
+            col, direction = stmt.order_by
+            col_idx = schema.column_index(col)
+            reverse = direction.upper() == "DESC"
+            rows.sort(key=lambda r: (r["values"][col_idx] is None, r["values"][col_idx]), reverse=reverse)
 
         if stmt.where:
             rows = [row for row in rows if self._matches_where(schema, row["values"], stmt.where)]
@@ -344,6 +399,9 @@ class Executor:
         if stmt.limit is not None:
             rows = rows[: stmt.limit]
 
+        if stmt.group_by or any(self._is_aggregate_expr(col) for col in stmt.columns):
+            return self._select_with_grouping(schema, rows, stmt)
+
         if stmt.columns == ["*"]:
             col_names = [col.name for col in schema.columns]
             return [dict(zip(col_names, row["values"])) for row in rows]
@@ -351,6 +409,32 @@ class Executor:
         out_cols = [name for name in stmt.columns]
         indices = [schema.column_index(name) for name in out_cols]
         return [{c: row["values"][i] for c, i in zip(out_cols, indices)} for row in rows]
+
+    def _select_with_grouping(self, schema: TableSchema, rows: List[Dict[str, Any]], stmt: SelectStmt) -> List[Dict[str, Any]]:
+        if stmt.columns == ["*"]:
+            raise ValueError("GROUP BY/aggregates require explicit SELECT columns")
+
+        group_cols = list(stmt.group_by or [])
+        grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
+
+        if group_cols:
+            for row in rows:
+                key = tuple(row["values"][schema.column_index(col)] for col in group_cols)
+                grouped.setdefault(key, []).append(row)
+        else:
+            grouped[(None,)] = rows
+
+        out: List[Dict[str, Any]] = []
+        for group_rows in grouped.values():
+            out_row: Dict[str, Any] = {}
+            for expr in stmt.columns:
+                if self._is_aggregate_expr(expr):
+                    out_row[expr] = self._eval_aggregate_expr(schema, group_rows, expr)
+                else:
+                    col_idx = schema.column_index(expr)
+                    out_row[expr] = group_rows[0]["values"][col_idx] if group_rows else None
+            out.append(out_row)
+        return out
 
     def _select_with_join(self, stmt: SelectStmt) -> List[Dict[str, Any]]:
         if stmt.join_table is None or stmt.join_left_column is None or stmt.join_right_column is None:
@@ -372,9 +456,11 @@ class Executor:
         joined: List[Dict[str, Any]] = []
         for left_row in left_rows:
             left_value = left_row["values"][left_on_idx]
+            matched = False
             for right_row in right_rows:
                 if left_value != right_row["values"][right_on_idx]:
                     continue
+                matched = True
                 merged = self._merge_join_row(
                     stmt.table_name,
                     left_schema,
@@ -382,6 +468,18 @@ class Executor:
                     stmt.join_table,
                     right_schema,
                     right_row["values"],
+                )
+                if stmt.where and not self._matches_where_join(merged, stmt.where):
+                    continue
+                joined.append(merged)
+            if stmt.join_type.upper() == "LEFT" and not matched:
+                merged = self._merge_join_row(
+                    stmt.table_name,
+                    left_schema,
+                    left_row["values"],
+                    stmt.join_table,
+                    right_schema,
+                    [None] * len(right_schema.columns),
                 )
                 if stmt.where and not self._matches_where_join(merged, stmt.where):
                     continue
@@ -435,29 +533,37 @@ class Executor:
         return [{"page_id": page_id, "slot_id": slot_id, "values": row_values}]
 
     def _select_secondary_index_fast_path(self, schema: TableSchema, stmt: SelectStmt) -> List[Dict[str, Any]] | None:
-        if stmt.join_table is not None or stmt.where is None or stmt.order_by is not None:
+        if stmt.join_table is not None or stmt.where is None:
             return None
         if len(stmt.where.groups) != 1 or len(stmt.where.groups[0]) != 1:
             return None
 
         col_name, op, raw_value = stmt.where.groups[0][0]
-        if op != "=" or raw_value is None:
+        if op not in {"=", "IN"} or raw_value is None:
             return None
 
         for idx_meta in schema.secondary_indexes or []:
             if idx_meta["column"].lower() != col_name.lower():
                 continue
             col_idx = schema.column_index(idx_meta["column"])
-            typed_value = coerce_value(raw_value, schema.columns[col_idx].data_type)
+            typed_values = (
+                [coerce_value(raw_value, schema.columns[col_idx].data_type)]
+                if op == "="
+                else [coerce_value(item, schema.columns[col_idx].data_type) for item in (raw_value or [])]
+            )
             btree = BTreeIndex(self.pager, int(idx_meta["root_page"]))
-            location = btree.find(typed_value)
-            if location is None:
-                return []
-            page_id, slot_id = location
-            row_values = self._read_row_at(schema, page_id, slot_id)
-            if row_values is None:
-                return []
-            return [{"page_id": page_id, "slot_id": slot_id, "values": row_values}]
+            out: List[Dict[str, Any]] = []
+            seen: set[Tuple[int, int]] = set()
+            for typed_value in typed_values:
+                for page_id, slot_id in btree.find_all(typed_value):
+                    if (page_id, slot_id) in seen:
+                        continue
+                    seen.add((page_id, slot_id))
+                    row_values = self._read_row_at(schema, page_id, slot_id)
+                    if row_values is None:
+                        continue
+                    out.append({"page_id": page_id, "slot_id": slot_id, "values": row_values})
+            return out
         return None
 
     def _update(self, stmt: UpdateStmt) -> int:
@@ -506,9 +612,9 @@ class Executor:
                 old_val = row["values"][col_idx]
                 new_val = new_values[col_idx]
                 if old_val is not None:
-                    sec_btree.delete(old_val)
+                    sec_btree.delete_non_unique(old_val, (row["page_id"], row["slot_id"]))
                 if new_val is not None:
-                    sec_btree.insert(new_val, (new_page, new_slot))
+                    sec_btree.insert_non_unique(new_val, (new_page, new_slot))
             affected += 1
 
         if affected:
@@ -573,7 +679,7 @@ class Executor:
                 col_idx = schema.column_index(idx_meta["column"])
                 old_val = row["values"][col_idx]
                 if old_val is not None:
-                    sec_btree.delete(old_val)
+                    sec_btree.delete_non_unique(old_val, (row["page_id"], row["slot_id"]))
             affected += 1
 
         if affected:
@@ -588,6 +694,43 @@ class Executor:
         for idx_meta in schema.secondary_indexes or []:
             out.append((idx_meta, BTreeIndex(self.pager, int(idx_meta["root_page"]))))
         return out
+
+    def _can_use_index_for_order(self, schema: TableSchema, col_name: str) -> bool:
+        if schema.pk_column and schema.pk_column.name.lower() == col_name.lower():
+            return True
+        return any(idx["column"].lower() == col_name.lower() for idx in (schema.secondary_indexes or []))
+
+    def _is_aggregate_expr(self, expr: str) -> bool:
+        upper = expr.upper()
+        return upper.startswith("COUNT(") or upper.startswith("SUM(") or upper.startswith("AVG(") or upper.startswith("MIN(") or upper.startswith("MAX(")
+
+    def _eval_aggregate_expr(self, schema: TableSchema, rows: List[Dict[str, Any]], expr: str) -> Any:
+        upper = expr.upper()
+        open_idx = expr.find("(")
+        close_idx = expr.rfind(")")
+        if open_idx == -1 or close_idx == -1 or close_idx <= open_idx:
+            raise ValueError(f"Invalid aggregate expression: {expr}")
+        func = upper[:open_idx]
+        arg = expr[open_idx + 1 : close_idx].strip()
+
+        if func == "COUNT" and arg == "*":
+            return len(rows)
+
+        col_idx = schema.column_index(arg)
+        values = [row["values"][col_idx] for row in rows if row["values"][col_idx] is not None]
+        if func == "COUNT":
+            return len(values)
+        if not values:
+            return None
+        if func == "SUM":
+            return sum(values)
+        if func == "AVG":
+            return sum(values) / len(values)
+        if func == "MIN":
+            return min(values)
+        if func == "MAX":
+            return max(values)
+        raise ValueError(f"Unsupported aggregate function: {func}")
 
     def _schema(self, table_name: str) -> TableSchema:
         key = table_name.lower()

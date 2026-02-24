@@ -62,6 +62,59 @@ class BTreeIndex:
             self.root_page_id = new_root_page
         self._insert_non_full(self.root_page_id, key, value)
 
+    def find_all(self, key: Any) -> List[Tuple[int, int]]:
+        node_page = self.root_page_id
+        while True:
+            node = self._read_node(node_page)
+            i = bisect.bisect_left(node.keys, key)
+            if node.is_leaf:
+                if i < len(node.keys) and node.keys[i] == key:
+                    raw_value = node.values[i]
+                    if isinstance(raw_value, list):
+                        return [tuple(v) for v in raw_value]
+                    return [tuple(raw_value)]
+                return []
+            node_page = node.children[i]
+
+    def insert_non_unique(self, key: Any, value: Tuple[int, int]) -> None:
+        root = self._read_node(self.root_page_id)
+        if len(root.keys) >= MAX_KEYS_PER_NODE:
+            new_root_page = self.pager.allocate_page()
+            new_root = Node(is_leaf=False, keys=[], children=[self.root_page_id], values=[])
+            self._write_node(new_root_page, new_root)
+            self._split_child(new_root_page, 0)
+            self.root_page_id = new_root_page
+        self._insert_non_full_non_unique(self.root_page_id, key, value)
+
+    def delete_non_unique(self, key: Any, value: Tuple[int, int]) -> bool:
+        node_page = self.root_page_id
+        while True:
+            node = self._read_node(node_page)
+            i = bisect.bisect_left(node.keys, key)
+            if node.is_leaf:
+                if i >= len(node.keys) or node.keys[i] != key:
+                    return False
+                raw_value = node.values[i]
+                if not isinstance(raw_value, list):
+                    if tuple(raw_value) == value:
+                        node.keys.pop(i)
+                        node.values.pop(i)
+                        self._write_node(node_page, node)
+                        return True
+                    return False
+                postings = [tuple(v) for v in raw_value]
+                if value not in postings:
+                    return False
+                postings.remove(value)
+                if postings:
+                    node.values[i] = postings
+                else:
+                    node.keys.pop(i)
+                    node.values.pop(i)
+                self._write_node(node_page, node)
+                return True
+            node_page = node.children[i]
+
     def delete(self, key: Any) -> bool:
         # For MVP we implement delete only at leaf level by traversing to the key location.
         # This keeps write paths predictable and is sufficient for moderate test sizes.
@@ -116,6 +169,34 @@ class BTreeIndex:
                 idx += 1
         self._insert_non_full(node.children[idx], key, value)
 
+    def _insert_non_full_non_unique(self, page_id: int, key: Any, value: Tuple[int, int]) -> None:
+        node = self._read_node(page_id)
+        if node.is_leaf:
+            idx = bisect.bisect_left(node.keys, key)
+            if idx < len(node.keys) and node.keys[idx] == key:
+                raw_value = node.values[idx]
+                if isinstance(raw_value, list):
+                    raw_value.append(tuple(value))
+                    node.values[idx] = raw_value
+                else:
+                    node.values[idx] = [tuple(raw_value), tuple(value)]
+                self._write_node(page_id, node)
+                return
+            node.keys.insert(idx, key)
+            node.values.insert(idx, [tuple(value)])
+            self._write_node(page_id, node)
+            return
+
+        idx = bisect.bisect_left(node.keys, key)
+        child_page = node.children[idx]
+        child = self._read_node(child_page)
+        if len(child.keys) >= MAX_KEYS_PER_NODE:
+            self._split_child(page_id, idx)
+            node = self._read_node(page_id)
+            if key > node.keys[idx]:
+                idx += 1
+        self._insert_non_full_non_unique(node.children[idx], key, value)
+
     def _split_child(self, parent_page: int, child_index: int) -> None:
         parent = self._read_node(parent_page)
         child_page = parent.children[child_index]
@@ -160,11 +241,19 @@ class BTreeIndex:
         raw = self.pager.read_page(page_id)
         (size,) = struct.unpack("<I", raw[:4])
         payload = json.loads(raw[4 : 4 + size].decode("utf-8")) if size else {}
+        values: List[Any] = []
+        for item in payload.get("values", []):
+            if isinstance(item, list) and item and isinstance(item[0], list):
+                values.append([tuple(v) for v in item])
+            elif isinstance(item, list):
+                values.append(tuple(item))
+            else:
+                values.append(item)
         return Node(
             is_leaf=payload.get("is_leaf", True),
             keys=payload.get("keys", []),
             children=payload.get("children", []),
-            values=[tuple(v) for v in payload.get("values", [])],
+            values=values,
         )
 
     def _write_node(self, page_id: int, node: Node) -> None:

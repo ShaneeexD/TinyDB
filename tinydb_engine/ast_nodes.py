@@ -41,10 +41,12 @@ class InsertStmt:
 class SelectStmt:
     table_name: str
     columns: Sequence[str]
+    join_type: str = "INNER"
     join_table: Optional[str] = None
     join_left_column: Optional[str] = None
     join_right_column: Optional[str] = None
     where: Optional[WhereClause] = None
+    group_by: Optional[Sequence[str]] = None
     order_by: Optional[Tuple[str, str]] = None
     limit: Optional[int] = None
 
@@ -72,6 +74,21 @@ class CreateIndexStmt:
     index_name: str
     table_name: str
     column_name: str
+
+
+@dataclass(frozen=True)
+class DropIndexStmt:
+    index_name: str
+
+
+@dataclass(frozen=True)
+class ShowIndexesStmt:
+    table_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ExplainStmt:
+    statement: "Statement"
 
 
 @dataclass(frozen=True)
@@ -132,6 +149,9 @@ Statement = (
     | DeleteStmt
     | DropTableStmt
     | CreateIndexStmt
+    | DropIndexStmt
+    | ShowIndexesStmt
+    | ExplainStmt
     | AlterTableRenameStmt
     | AlterTableRenameColumnStmt
     | AlterTableAddColumnStmt

@@ -33,6 +33,7 @@ SQL_KEYWORDS = {
     "DEFAULT",
     "DESCRIBE",
     "DROP",
+    "EXPLAIN",
     "DESC",
     "FALSE",
     "FROM",
@@ -59,6 +60,7 @@ SQL_KEYWORDS = {
     "SHOW",
     "TABLE",
     "TABLES",
+    "INDEXES",
     "TO",
     "TRUE",
     "UNIQUE",
@@ -91,8 +93,11 @@ Use only syntax supported by tinydb_engine:
 - ALTER TABLE ... ADD COLUMN ...
 - ALTER TABLE ... REMOVE COLUMN ...
 - CREATE INDEX ... ON table_name(column_name)
+- DROP INDEX index_name
 - SHOW TABLES
+- SHOW INDEXES [table_name]
 - DESCRIBE table_name
+- EXPLAIN SELECT ...
 - BEGIN / COMMIT / ROLLBACK
 
 Important limitations:
@@ -100,7 +105,7 @@ Important limitations:
 - TIMESTAMP values should be string literals (example: '2023-04-01 12:34:56').
 - WHERE supports AND/OR predicates, IN (...), NOT IN (...), LIKE, IS NULL, IS NOT NULL.
 - JOIN support is currently one INNER JOIN per SELECT.
-- CREATE INDEX currently supports UNIQUE columns.
+- CREATE INDEX supports UNIQUE and non-UNIQUE columns.
 - ALTER TABLE ADD COLUMN supports nullable non-PK columns only.
 - ALTER TABLE REMOVE COLUMN supports only removing the last non-PK column.
 - Identifiers must match schema names exactly (e.g. player_id, not "player id").
