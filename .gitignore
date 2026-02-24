@@ -31,6 +31,9 @@ Thumbs.db
 
 # TinyDB GUI local/runtime files
 *.db
-*.db-wal
+*.db.wal
 tinydb_gui.log
 .tinydb_gui_config.json
+
+# Local benchmark artifacts
+scripts/*.tmp
