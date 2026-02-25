@@ -16,6 +16,7 @@ class ColumnSchema:
     not_null: bool = False
     unique: bool = False
     default_value: Any = None
+    auto_increment: bool = False
 
 
 @dataclass
@@ -103,6 +104,7 @@ def serialize_schema_map(schema_map: Dict[str, TableSchema]) -> Dict[str, Any]:
                     "not_null": col.not_null,
                     "unique": col.unique,
                     "default_value": col.default_value,
+                    "auto_increment": col.auto_increment,
                 }
                 for col in schema.columns
             ],

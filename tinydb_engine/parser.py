@@ -32,7 +32,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -198,6 +198,11 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
         return CreateIndexStmt(index_name=index_name, table_name=table_name, column_name=column_name)
 
     stream.expect("TABLE")
+    if_not_exists = False
+    if stream.consume("IF"):
+        stream.expect("NOT")
+        stream.expect("EXISTS")
+        if_not_exists = True
     table_name = stream.pop()
     stream.expect("(")
 
@@ -222,11 +227,19 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
             not_null = False
             unique = False
             default_value: Any = None
+            auto_increment = False
             while True:
                 if stream.consume("PRIMARY"):
                     stream.expect("KEY")
                     primary_key = True
                     not_null = True
+                    continue
+                if stream.consume("AUTO"):
+                    stream.expect("INCREMENT")
+                    auto_increment = True
+                    continue
+                if stream.consume("AUTOINCREMENT"):
+                    auto_increment = True
                     continue
                 if stream.consume("NOT"):
                     stream.expect("NULL")
@@ -247,6 +260,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
                     not_null=not_null,
                     unique=unique,
                     default_value=default_value,
+                    auto_increment=auto_increment,
                 )
             )
 
@@ -256,7 +270,12 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
         break
 
     _assert_consumed(stream)
-    return CreateTableStmt(table_name=table_name, columns=columns, foreign_keys=foreign_keys)
+    return CreateTableStmt(
+        table_name=table_name,
+        columns=columns,
+        foreign_keys=foreign_keys,
+        if_not_exists=if_not_exists,
+    )
 
 
 def _parse_insert(stream: TokenStream) -> InsertStmt:

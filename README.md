@@ -9,7 +9,7 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
 - Single-file on-disk database
 - Fixed-size page storage (4096 bytes)
 - SQL-like commands:
-  - `CREATE TABLE`
+  - `CREATE TABLE` (supports `IF NOT EXISTS`)
   - `INSERT INTO ... VALUES`
   - `SELECT ... [WHERE] [ORDER BY] [LIMIT]`
   - `UPDATE ... SET ... [WHERE]`
@@ -30,6 +30,7 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
   - `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`
 - Constraints:
   - single-column `PRIMARY KEY`
+  - `INTEGER PRIMARY KEY AUTOINCREMENT`
   - `NOT NULL`
   - `FOREIGN KEY (col) REFERENCES other_table(other_col)`
   - Note: `ALTER TABLE ... ADD COLUMN` currently allows nullable, non-PK columns only.
@@ -83,7 +84,7 @@ from tinydb_engine import TinyDB
 
 db = TinyDB("app.db")
 
-db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT)")
+db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, name TEXT)")
 db.execute("INSERT INTO users VALUES (1, 'alice@example.com', 'Alice')")
 db.execute("INSERT INTO users VALUES (2, 'bob@example.com', 'Bob')")
 
@@ -100,7 +101,7 @@ db.close()
 ## SQL examples you can run
 
 ```sql
-CREATE TABLE games (id INTEGER PRIMARY KEY, user_id INTEGER, result TEXT);
+CREATE TABLE IF NOT EXISTS games (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, result TEXT);
 INSERT INTO games VALUES (10, 1, 'W'), (11, 2, 'L');
 
 SELECT users.name, games.result

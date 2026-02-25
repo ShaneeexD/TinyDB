@@ -40,6 +40,36 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_create_table_if_not_exists(tmp_path):
+    db_path = tmp_path / "crud_if_not_exists.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+    finally:
+        db.close()
+
+
+def test_autoincrement_integer_primary_key(tmp_path):
+    db_path = tmp_path / "crud_autoinc.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)") == "OK"
+
+        assert db.execute("INSERT INTO users (name) VALUES ('Alice')") == "OK"
+        assert db.execute("INSERT INTO users (name) VALUES ('Bob')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (NULL, 'Cara')") == "OK"
+
+        rows = db.execute("SELECT id, name FROM users ORDER BY id ASC")
+        assert rows == [
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob"},
+            {"id": 3, "name": "Cara"},
+        ]
+    finally:
+        db.close()
+
+
 def test_select_as_alias_support(tmp_path):
     db_path = tmp_path / "crud_alias.db"
     db = TinyDB(str(db_path))

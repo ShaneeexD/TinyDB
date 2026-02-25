@@ -191,6 +191,8 @@ class Executor:
     def _create_table(self, stmt: CreateTableStmt) -> str:
         key = stmt.table_name.lower()
         if key in self.schemas:
+            if stmt.if_not_exists:
+                return "OK"
             raise ValueError(f"Table already exists: {stmt.table_name}")
 
         columns = [
@@ -200,6 +202,7 @@ class Executor:
                 primary_key=col.primary_key,
                 not_null=col.not_null,
                 unique=col.unique,
+                auto_increment=col.auto_increment,
                 default_value=(
                     coerce_value(col.default_value, normalize_type(col.data_type))
                     if col.default_value is not None
@@ -212,6 +215,15 @@ class Executor:
         pk_count = sum(1 for c in columns if c.primary_key)
         if pk_count > 1:
             raise ValueError("Only one PRIMARY KEY is supported")
+        auto_inc_cols = [c for c in columns if c.auto_increment]
+        if len(auto_inc_cols) > 1:
+            raise ValueError("Only one AUTOINCREMENT column is supported")
+        if auto_inc_cols:
+            auto_col = auto_inc_cols[0]
+            if not auto_col.primary_key:
+                raise ValueError("AUTOINCREMENT requires PRIMARY KEY")
+            if auto_col.data_type != "INTEGER":
+                raise ValueError("AUTOINCREMENT requires INTEGER PRIMARY KEY")
 
         foreign_keys: List[dict[str, str]] = []
         for local_column, ref_table, ref_column in stmt.foreign_keys:
@@ -828,7 +840,11 @@ class Executor:
         if columns is None:
             if len(values) != len(schema.columns):
                 raise ValueError("INSERT value count mismatch")
-            return values
+            out = list(values)
+            for idx, column in enumerate(schema.columns):
+                if column.auto_increment and out[idx] is None:
+                    out[idx] = self._next_auto_increment_value(schema, idx)
+            return out
 
         out = [None] * len(schema.columns)
         if len(columns) != len(values):
@@ -838,7 +854,20 @@ class Executor:
         for idx, column in enumerate(schema.columns):
             if out[idx] is None and column.default_value is not None:
                 out[idx] = column.default_value
+            if out[idx] is None and column.auto_increment:
+                out[idx] = self._next_auto_increment_value(schema, idx)
         return out
+
+    def _next_auto_increment_value(self, schema: TableSchema, column_idx: int) -> int:
+        max_seen: int | None = None
+        for row in self._scan_rows(schema):
+            value = row["values"][column_idx]
+            if value is None:
+                continue
+            as_int = int(value)
+            if max_seen is None or as_int > max_seen:
+                max_seen = as_int
+        return 1 if max_seen is None else max_seen + 1
 
     def _enforce_unique_constraints(
         self,

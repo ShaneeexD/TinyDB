@@ -15,6 +15,7 @@ class ColumnDef:
     not_null: bool = False
     unique: bool = False
     default_value: Any = None
+    auto_increment: bool = False
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class CreateTableStmt:
     table_name: str
     columns: Sequence[ColumnDef]
     foreign_keys: Sequence[Tuple[str, str, str]]
+    if_not_exists: bool = False
 
 
 @dataclass(frozen=True)

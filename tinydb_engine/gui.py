@@ -85,6 +85,7 @@ CLAUDE_SYSTEM_PROMPT = """You are an assistant that writes SQL for tinydb_engine
 Return exactly one SQL statement and nothing else (no markdown, no prose, no code fences).
 Use only syntax supported by tinydb_engine:
 - CREATE TABLE
+- CREATE TABLE IF NOT EXISTS
 - FOREIGN KEY (col) REFERENCES other_table(other_col) inside CREATE TABLE
 - INSERT INTO ... VALUES (...) or INSERT INTO ... VALUES (...), (...)
 - SELECT ... [JOIN ... ON ...] [WHERE] [ORDER BY] [LIMIT]
@@ -107,6 +108,7 @@ Use only syntax supported by tinydb_engine:
 
 Important limitations:
 - Available SQL column types: INTEGER, TEXT, REAL, BOOLEAN, TIMESTAMP, BLOB, DECIMAL (NUMERIC alias).
+- AUTOINCREMENT is supported only on INTEGER PRIMARY KEY columns.
 - TIMESTAMP values should be string literals (example: '2023-04-01 12:34:56').
 - WHERE supports AND/OR predicates, IN (...), NOT IN (...), LIKE, IS NULL, IS NOT NULL.
 - JOIN support is currently one INNER JOIN per SELECT.
