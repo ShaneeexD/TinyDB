@@ -38,6 +38,21 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
 - WAL-based crash recovery
 - Python API + interactive REPL CLI
 
+## Good fit for these app types
+
+`tinydb_engine` is best for lightweight embedded storage where simple setup matters more than enterprise-scale operations.
+
+Great fits:
+- Indie games (save data, player inventories, match history, local leaderboards)
+- Desktop tools and utilities (notes, configs, local catalogs, offline-first apps)
+- Small web apps and dashboards with modest traffic
+- Internal tools and prototypes that need SQL support without running a separate DB server
+- Education and experimentation (learning database internals and SQL execution flow)
+
+Less ideal:
+- High-concurrency, high-throughput multi-tenant backend systems
+- Large distributed systems that need deep operational tooling and horizontal scaling
+
 ## Install
 
 ### Windows quick install
