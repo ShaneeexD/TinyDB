@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import struct
+import time
 from typing import Any, Dict, List, Sequence, Tuple
 
 from tinydb_engine.ast_nodes import (
@@ -17,9 +19,11 @@ from tinydb_engine.ast_nodes import (
     DropTableStmt,
     ExplainStmt,
     InsertStmt,
+    ProfileStmt,
     RollbackStmt,
     SelectStmt,
     ShowIndexesStmt,
+    ShowStatsStmt,
     ShowTablesStmt,
     Statement,
     UpdateStmt,
@@ -46,10 +50,14 @@ class Executor:
             return self._show_tables()
         if isinstance(statement, ShowIndexesStmt):
             return self._show_indexes(statement)
+        if isinstance(statement, ShowStatsStmt):
+            return self._show_stats()
         if isinstance(statement, DescribeTableStmt):
             return self._describe_table(statement)
         if isinstance(statement, ExplainStmt):
             return self._explain(statement)
+        if isinstance(statement, ProfileStmt):
+            return self._profile(statement)
         if isinstance(statement, CreateTableStmt):
             return self._create_table(statement)
         if isinstance(statement, CreateIndexStmt):
@@ -96,21 +104,51 @@ class Executor:
         rows.sort(key=lambda r: (r["table_name"].lower(), r["index_name"].lower()))
         return rows
 
+    def _show_stats(self) -> List[Dict[str, Any]]:
+        table_count = len(self.schemas)
+        index_count = sum(len(schema.secondary_indexes or []) for schema in self.schemas.values())
+        total_rows = sum(len(self._scan_rows(schema)) for schema in self.schemas.values())
+        file_size_bytes = os.path.getsize(self.pager.path) if os.path.exists(self.pager.path) else 0
+        return [
+            {
+                "table_count": table_count,
+                "index_count": index_count,
+                "row_count": total_rows,
+                "page_count": self.pager.page_count(),
+                "file_size_bytes": file_size_bytes,
+            }
+        ]
+
     def _explain(self, stmt: ExplainStmt) -> List[Dict[str, Any]]:
-        inner = stmt.statement
+        return [{"plan": self._plan_label(stmt.statement)}]
+
+    def _profile(self, stmt: ProfileStmt) -> List[Dict[str, Any]]:
+        start = time.perf_counter()
+        result = self.execute(stmt.statement)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        row_count = len(result) if isinstance(result, list) else None
+        return [
+            {
+                "elapsed_ms": round(elapsed_ms, 3),
+                "row_count": row_count,
+                "plan": self._plan_label(stmt.statement),
+            }
+        ]
+
+    def _plan_label(self, inner: Statement) -> str:
         if not isinstance(inner, SelectStmt):
-            return [{"plan": f"FULL EXECUTION ({type(inner).__name__})"}]
+            return f"FULL EXECUTION ({type(inner).__name__})"
 
         schema = self._schema(inner.table_name)
         if inner.join_table is not None:
-            return [{"plan": "NESTED LOOP JOIN"}]
+            return "NESTED LOOP JOIN"
         if self._select_pk_fast_path(schema, inner) is not None:
-            return [{"plan": "PK INDEX LOOKUP"}]
+            return "PK INDEX LOOKUP"
         if self._select_secondary_index_fast_path(schema, inner) is not None:
-            return [{"plan": "SECONDARY INDEX LOOKUP"}]
+            return "SECONDARY INDEX LOOKUP"
         if inner.order_by and self._can_use_index_for_order(schema, inner.order_by[0]):
-            return [{"plan": "INDEX ORDER SCAN"}]
-        return [{"plan": "FULL TABLE SCAN"}]
+            return "INDEX ORDER SCAN"
+        return "FULL TABLE SCAN"
 
     def _describe_table(self, stmt: DescribeTableStmt) -> List[Dict[str, Any]]:
         schema = self._schema(stmt.table_name)

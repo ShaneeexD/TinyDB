@@ -96,7 +96,17 @@ class ShowIndexesStmt:
 
 
 @dataclass(frozen=True)
+class ShowStatsStmt:
+    pass
+
+
+@dataclass(frozen=True)
 class ExplainStmt:
+    statement: "Statement"
+
+
+@dataclass(frozen=True)
+class ProfileStmt:
     statement: "Statement"
 
 
@@ -160,7 +170,9 @@ Statement = (
     | CreateIndexStmt
     | DropIndexStmt
     | ShowIndexesStmt
+    | ShowStatsStmt
     | ExplainStmt
+    | ProfileStmt
     | AlterTableRenameStmt
     | AlterTableRenameColumnStmt
     | AlterTableAddColumnStmt

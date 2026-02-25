@@ -20,6 +20,41 @@ def test_show_tables(tmp_path):
         db.close()
 
 
+def test_show_stats(tmp_path):
+    db = TinyDB(str(tmp_path / "show_stats.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+        db.execute("INSERT INTO users VALUES (1, 'Alice')")
+        db.execute("CREATE INDEX idx_users_name ON users(name)")
+
+        rows = db.execute("SHOW STATS")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["table_count"] == 1
+        assert row["index_count"] == 1
+        assert row["row_count"] == 1
+        assert row["page_count"] >= 1
+        assert row["file_size_bytes"] > 0
+    finally:
+        db.close()
+
+
+def test_profile_select(tmp_path):
+    db = TinyDB(str(tmp_path / "profile_select.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+        db.execute("INSERT INTO users VALUES (1, 'Alice')")
+
+        rows = db.execute("PROFILE SELECT id FROM users WHERE id = 1")
+        assert len(rows) == 1
+        row = rows[0]
+        assert isinstance(row["elapsed_ms"], float)
+        assert row["row_count"] == 1
+        assert isinstance(row["plan"], str)
+    finally:
+        db.close()
+
+
 def test_describe_table(tmp_path):
     db = TinyDB(str(tmp_path / "describe_table.db"))
     try:

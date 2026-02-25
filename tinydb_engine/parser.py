@@ -20,9 +20,11 @@ from .ast_nodes import (
     ExplainStmt,
     InsertStmt,
     JoinClause,
+    ProfileStmt,
     RollbackStmt,
     SelectStmt,
     ShowIndexesStmt,
+    ShowStatsStmt,
     ShowTablesStmt,
     Statement,
     UpdateStmt,
@@ -30,7 +32,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -159,13 +161,22 @@ def parse(sql: str) -> Statement:
             table_name = stream.pop() if stream.peek() is not None else None
             _assert_consumed(stream)
             return ShowIndexesStmt(table_name=table_name)
-        raise ParseError("Expected TABLES or INDEXES after SHOW")
+        if stream.consume("STATS"):
+            _assert_consumed(stream)
+            return ShowStatsStmt()
+        raise ParseError("Expected TABLES, INDEXES, or STATS after SHOW")
     if keyword == "EXPLAIN":
         stream.pop()
         rest = " ".join(stream.tokens[stream.pos :])
         if not rest.strip():
             raise ParseError("EXPLAIN requires a statement")
         return ExplainStmt(statement=parse(rest))
+    if keyword == "PROFILE":
+        stream.pop()
+        rest = " ".join(stream.tokens[stream.pos :])
+        if not rest.strip():
+            raise ParseError("PROFILE requires a statement")
+        return ProfileStmt(statement=parse(rest))
     if keyword == "DESCRIBE":
         stream.pop()
         table_name = stream.pop()

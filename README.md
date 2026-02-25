@@ -116,6 +116,32 @@ SHOW INDEXES users;
 DESCRIBE users;
 ```
 
+## Custom keywords (TinyDB-specific)
+
+These commands are useful for inspecting and profiling your database quickly:
+
+- `SHOW TABLES`  
+  Lists tables in the current DB.
+- `SHOW INDEXES [table_name]`  
+  Lists secondary indexes (optionally for one table).
+- `SHOW STATS`  
+  Returns a quick DB summary (`table_count`, `index_count`, `row_count`, `page_count`, `file_size_bytes`).
+- `DESCRIBE table_name`  
+  Shows column metadata (type, PK, NULL, default, FK, indexes).
+- `EXPLAIN SELECT ...`  
+  Shows the chosen plan label (e.g. PK lookup, secondary index lookup, full scan).
+- `PROFILE SELECT ...`  
+  Runs the query and returns timing + row count + plan.
+
+Example:
+
+```sql
+SHOW STATS;
+SHOW INDEXES users;
+EXPLAIN SELECT id FROM users WHERE id = 1;
+PROFILE SELECT id, name FROM users ORDER BY id ASC LIMIT 50;
+```
+
 ## CLI / REPL
 
 ```powershell

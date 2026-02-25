@@ -52,6 +52,7 @@ SQL_KEYWORDS = {
     "OR",
     "ORDER",
     "ON",
+    "PROFILE",
     "PRIMARY",
     "REMOVE",
     "RENAME",
@@ -59,6 +60,7 @@ SQL_KEYWORDS = {
     "SELECT",
     "SET",
     "SHOW",
+    "STATS",
     "TABLE",
     "TABLES",
     "INDEXES",
@@ -97,8 +99,10 @@ Use only syntax supported by tinydb_engine:
 - DROP INDEX index_name
 - SHOW TABLES
 - SHOW INDEXES [table_name]
+- SHOW STATS
 - DESCRIBE table_name
 - EXPLAIN SELECT ...
+- PROFILE SELECT ...
 - BEGIN / COMMIT / ROLLBACK
 
 Important limitations:
