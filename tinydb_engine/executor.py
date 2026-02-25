@@ -406,9 +406,10 @@ class Executor:
             col_names = [col.name for col in schema.columns]
             return [dict(zip(col_names, row["values"])) for row in rows]
 
-        out_cols = [name for name in stmt.columns]
-        indices = [schema.column_index(name) for name in out_cols]
-        return [{c: row["values"][i] for c, i in zip(out_cols, indices)} for row in rows]
+        exprs = [self._split_alias(name) for name in stmt.columns]
+        indices = [schema.column_index(expr) for expr, _ in exprs]
+        aliases = [alias for _, alias in exprs]
+        return [{a: row["values"][i] for a, i in zip(aliases, indices)} for row in rows]
 
     def _select_with_grouping(self, schema: TableSchema, rows: List[Dict[str, Any]], stmt: SelectStmt) -> List[Dict[str, Any]]:
         if stmt.columns == ["*"]:
@@ -428,11 +429,12 @@ class Executor:
         for group_rows in grouped.values():
             out_row: Dict[str, Any] = {}
             for expr in stmt.columns:
-                if self._is_aggregate_expr(expr):
-                    out_row[expr] = self._eval_aggregate_expr(schema, group_rows, expr)
+                base_expr, alias = self._split_alias(expr)
+                if self._is_aggregate_expr(base_expr):
+                    out_row[alias] = self._eval_aggregate_expr(schema, group_rows, base_expr)
                 else:
-                    col_idx = schema.column_index(expr)
-                    out_row[expr] = group_rows[0]["values"][col_idx] if group_rows else None
+                    col_idx = schema.column_index(base_expr)
+                    out_row[alias] = group_rows[0]["values"][col_idx] if group_rows else None
             out.append(out_row)
         return out
 
@@ -526,8 +528,9 @@ class Executor:
         for row in joined:
             out_row: Dict[str, Any] = {}
             for col in stmt.columns:
-                key = self._resolve_join_column_key_multi(col, all_schemas)
-                out_row[col] = row.get(key)
+                expr, alias = self._split_alias(col)
+                key = self._resolve_join_column_key_multi(expr, all_schemas)
+                out_row[alias] = row.get(key)
             out.append(out_row)
         return out
 
@@ -731,6 +734,18 @@ class Executor:
     def _is_aggregate_expr(self, expr: str) -> bool:
         upper = expr.upper()
         return upper.startswith("COUNT(") or upper.startswith("SUM(") or upper.startswith("AVG(") or upper.startswith("MIN(") or upper.startswith("MAX(")
+
+    def _split_alias(self, expr: str) -> Tuple[str, str]:
+        marker = " AS "
+        upper_expr = expr.upper()
+        idx = upper_expr.rfind(marker)
+        if idx == -1:
+            return expr, expr
+        base = expr[:idx].strip()
+        alias = expr[idx + len(marker) :].strip()
+        if not base or not alias:
+            raise ValueError(f"Invalid AS alias expression: {expr}")
+        return base, alias
 
     def _eval_aggregate_expr(self, schema: TableSchema, rows: List[Dict[str, Any]], expr: str) -> Any:
         upper = expr.upper()

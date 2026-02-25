@@ -37,3 +37,11 @@ tinydb_gui.log
 
 # Local benchmark artifacts
 scripts/*.tmp
+
+# Finance demo artifacts
+finance_demo.db
+finance_demo.db.wal
+scripts/finance_demo_output*.txt
+run_finance_demo.bat
+seed_finance_demo.py
+finance_demo_app.py

@@ -40,6 +40,36 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_select_as_alias_support(tmp_path):
+    db_path = tmp_path / "crud_alias.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("CREATE TABLE scores (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, points REAL NOT NULL)") == "OK"
+
+        db.execute("INSERT INTO users VALUES (1, 'Alice')")
+        db.execute("INSERT INTO users VALUES (2, 'Bob')")
+        db.execute("INSERT INTO scores VALUES (10, 1, 9.5)")
+        db.execute("INSERT INTO scores VALUES (11, 1, 7.0)")
+        db.execute("INSERT INTO scores VALUES (12, 2, 6.5)")
+
+        rows = db.execute("SELECT id AS user_id, name AS username FROM users ORDER BY id ASC")
+        assert rows == [{"user_id": 1, "username": "Alice"}, {"user_id": 2, "username": "Bob"}]
+
+        rows = db.execute("SELECT user_id, SUM(points) AS total_points FROM scores GROUP BY user_id ORDER BY user_id ASC")
+        assert rows == [{"user_id": 1, "total_points": 16.5}, {"user_id": 2, "total_points": 6.5}]
+
+        rows = db.execute(
+            "SELECT users.name AS player_name, scores.points AS score "
+            "FROM users JOIN scores ON users.id = scores.user_id "
+            "WHERE users.id = 1 "
+            "ORDER BY scores.id ASC LIMIT 1"
+        )
+        assert rows == [{"player_name": "Alice", "score": 9.5}]
+    finally:
+        db.close()
+
+
 def test_select_left_join_support(tmp_path):
     db_path = tmp_path / "crud_left_join.db"
     db = TinyDB(str(db_path))

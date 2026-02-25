@@ -23,6 +23,7 @@ SQL_KEYWORDS = {
     "ADD",
     "ALTER",
     "AND",
+    "AS",
     "ASC",
     "BEGIN",
     "BY",
