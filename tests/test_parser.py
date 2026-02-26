@@ -60,6 +60,17 @@ def test_parse_select_group_by_having():
     assert stmt.having.groups == [[("total", ">=", 2)]]
 
 
+def test_parse_select_count_case_when_expression():
+    stmt = parse("SELECT COUNT(CASE WHEN win = 1 THEN 1 END) AS num_wins FROM bets")
+    assert stmt.columns == ["COUNT(CASE WHEN win = 1 THEN 1 END) AS num_wins"]
+
+
+def test_parse_having_scalar_subquery_comparison():
+    stmt = parse("SELECT COUNT(*) AS c FROM bets HAVING c = (SELECT COUNT(*) FROM bets)")
+    assert stmt.having is not None
+    assert stmt.having.groups == [[("c", "=_SUBQUERY", "SELECT COUNT(*) FROM bets")]]
+
+
 def test_parse_insert_or_replace():
     stmt = parse("INSERT OR REPLACE INTO users (id, name) VALUES (1, 'Alice')")
     assert stmt.or_replace is True

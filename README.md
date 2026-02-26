@@ -181,8 +181,9 @@ run_gui.bat app.db
 ## Notes
 
 - Transactions: implicit per statement, or explicit `BEGIN` / `COMMIT` / `ROLLBACK`.
-- Supported predicates: `AND`, `OR`, `IN`, `NOT IN`, `IN (SELECT ...)`, `NOT IN (SELECT ...)`, `LIKE`, `IS NULL`, `IS NOT NULL`.
+- Supported predicates: `AND`, `OR`, `IN`, `NOT IN`, `IN (SELECT ...)`, `NOT IN (SELECT ...)`, scalar subquery comparisons like `col = (SELECT ...)`, `LIKE`, `IS NULL`, `IS NOT NULL`.
 - Joins: chained `JOIN`, `INNER JOIN`, and `LEFT JOIN` (equality `ON`) with optional table aliases.
-- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`, `HAVING`), including `COUNT(DISTINCT col)`.
+- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`, `HAVING`), including `COUNT(DISTINCT col)` and `COUNT(CASE WHEN col = value THEN 1 END)`.
+- Expression helpers: `ROUND(AVG(col), n)` / `ROUND(SUM(col), n)`.
 - Types: `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`, `BLOB`, `DECIMAL` (`NUMERIC` alias).
 - Binary-safe BLOB inserts are best done with parameter binding (`?`) so arbitrary bytes are preserved.

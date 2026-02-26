@@ -25,29 +25,46 @@ SQL_KEYWORDS = {
     "AND",
     "AS",
     "ASC",
+    "AUTO",
+    "AUTOINCREMENT",
     "BEGIN",
     "BY",
+    "CASE",
     "COLUMN",
+    "CHECK",
     "COMMIT",
     "CREATE",
+    "EXISTS",
+    "COUNT",
+    "AVG",
+    "SUM",
+    "MIN",
+    "MAX",
+    "CASCADE",
     "DELETE",
     "DEFAULT",
     "DESCRIBE",
     "DROP",
     "EXPLAIN",
+    "END",
     "DESC",
     "DISTINCT",
     "FALSE",
+    "FOREIGN",
     "FROM",
     "GROUP",
     "HAVING",
+    "IF",
+    "INCREMENT",
     "IS",
     "IN",
     "INDEX",
+    "INNER",
     "INSERT",
     "INTO",
     "JOIN",
     "KEY",
+    "LEFT",
     "LIKE",
     "LIMIT",
     "NOT",
@@ -57,9 +74,12 @@ SQL_KEYWORDS = {
     "ON",
     "PROFILE",
     "PRIMARY",
+    "REFERENCES",
     "REPLACE",
     "REMOVE",
     "RENAME",
+    "ROUND",
+    "RESTRICT",
     "ROLLBACK",
     "SELECT",
     "SET",
@@ -70,9 +90,11 @@ SQL_KEYWORDS = {
     "INDEXES",
     "TO",
     "TRUE",
+    "THEN",
     "UNIQUE",
     "UPDATE",
     "VALUES",
+    "WHEN",
     "WHERE",
 }
 
@@ -115,8 +137,11 @@ Important limitations:
 - Available SQL column types: INTEGER, TEXT, REAL, BOOLEAN, TIMESTAMP, BLOB, DECIMAL (NUMERIC alias).
 - AUTOINCREMENT is supported only on INTEGER PRIMARY KEY columns.
 - TIMESTAMP values should be string literals (example: '2023-04-01 12:34:56').
-- WHERE supports AND/OR predicates, IN (...), NOT IN (...), LIKE, IS NULL, IS NOT NULL.
+- WHERE/HAVING supports AND/OR predicates, IN (...), NOT IN (...), LIKE, IS NULL, IS NOT NULL,
+  scalar subquery comparisons like `col = (SELECT ...)`, and IN/NOT IN subqueries.
 - JOIN support is currently one INNER JOIN per SELECT.
+- Aggregates: COUNT, SUM, AVG, MIN, MAX; includes COUNT(DISTINCT col).
+- Supported expression helpers: ROUND(AVG(col), n), ROUND(SUM(col), n), COUNT(CASE WHEN col = value THEN 1 END).
 - CREATE INDEX supports UNIQUE and non-UNIQUE columns.
 - ALTER TABLE ADD COLUMN supports nullable non-PK columns only.
 - ALTER TABLE REMOVE COLUMN supports only removing the last non-PK column.

@@ -81,6 +81,18 @@ def _parse_identifier(stream: TokenStream) -> str:
 
 def _parse_select_expression(stream: TokenStream) -> str:
     token = stream.pop()
+    if token.upper() == "CASE":
+        expr_parts = [token]
+        case_depth = 1
+        while case_depth > 0:
+            part = stream.pop()
+            if part.upper() == "CASE":
+                case_depth += 1
+            elif part.upper() == "END":
+                case_depth -= 1
+            expr_parts.append(part)
+        return " ".join(expr_parts)
+
     if stream.peek() != "(":
         if stream.consume("."):
             token = f"{token}.{stream.pop()}"
@@ -95,7 +107,19 @@ def _parse_select_expression(stream: TokenStream) -> str:
         elif part == ")":
             depth -= 1
         expr_parts.append(part)
+    if any(part.upper() == "CASE" for part in expr_parts[2:-1]):
+        return f"{expr_parts[0]}({' '.join(expr_parts[2:-1])})"
     return "".join(expr_parts)
+
+
+def _tokens_to_sql(tokens: Sequence[str]) -> str:
+    sql = " ".join(tokens)
+    sql = sql.replace("( ", "(").replace(" )", ")")
+    sql = sql.replace(" ,", ",")
+    sql = sql.replace(" . ", ".")
+    sql = sql.replace(" .", ".").replace(". ", ".")
+    sql = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\s+\(", r"\1(", sql)
+    return sql
 
 
 def _parse_optional_table_alias(stream: TokenStream) -> str | None:
@@ -663,7 +687,7 @@ def _parse_predicate_groups(stream: TokenStream) -> WhereClause:
                         depth += 1
                     elif token == ")":
                         depth -= 1
-                subquery_sql = " ".join(stream.tokens[start : stream.pos - 1])
+                subquery_sql = _tokens_to_sql(stream.tokens[start : stream.pos - 1])
                 current_group.append((col, "IN_SUBQUERY", subquery_sql))
             else:
                 values: List[Any] = []
@@ -686,7 +710,7 @@ def _parse_predicate_groups(stream: TokenStream) -> WhereClause:
                         depth += 1
                     elif token == ")":
                         depth -= 1
-                subquery_sql = " ".join(stream.tokens[start : stream.pos - 1])
+                subquery_sql = _tokens_to_sql(stream.tokens[start : stream.pos - 1])
                 current_group.append((col, "NOT IN_SUBQUERY", subquery_sql))
             else:
                 values = []
@@ -703,8 +727,20 @@ def _parse_predicate_groups(stream: TokenStream) -> WhereClause:
         else:
             if op not in {"=", "!=", "<", "<=", ">", ">="}:
                 raise ParseError(f"Unsupported operator: {op}")
-            value = _parse_literal(stream.pop())
-            current_group.append((col, op, value))
+            if stream.consume("(") and stream.peek() is not None and stream.peek().upper() == "SELECT":
+                start = stream.pos
+                depth = 1
+                while depth > 0:
+                    token = stream.pop()
+                    if token == "(":
+                        depth += 1
+                    elif token == ")":
+                        depth -= 1
+                subquery_sql = _tokens_to_sql(stream.tokens[start : stream.pos - 1])
+                current_group.append((col, f"{op}_SUBQUERY", subquery_sql))
+            else:
+                value = _parse_literal(stream.pop())
+                current_group.append((col, op, value))
 
         if stream.consume("AND"):
             continue

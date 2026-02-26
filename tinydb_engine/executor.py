@@ -4,7 +4,7 @@ import os
 import re
 import struct
 import time
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from tinydb_engine.ast_nodes import (
     AlterTableAddColumnStmt,
@@ -489,6 +489,10 @@ class Executor:
         if stmt.where:
             rows = [row for row in rows if self._matches_where(schema, row["values"], stmt.where)]
 
+        is_grouped_query = bool(stmt.group_by or any(self._is_aggregate_expr(col) or self._is_round_expr(col) for col in stmt.columns))
+        if is_grouped_query:
+            return self._select_with_grouping(schema, rows, stmt)
+
         if stmt.order_by:
             col, direction = stmt.order_by
             col_idx = schema.column_index(col)
@@ -497,9 +501,6 @@ class Executor:
 
         if stmt.limit is not None:
             rows = rows[: stmt.limit]
-
-        if stmt.group_by or any(self._is_aggregate_expr(col) for col in stmt.columns):
-            return self._select_with_grouping(schema, rows, stmt)
 
         if stmt.columns == ["*"]:
             col_names = [col.name for col in schema.columns]
@@ -514,6 +515,12 @@ class Executor:
         out = [{a: row["values"][i] for a, i in zip(aliases, indices)} for row in rows]
         if stmt.distinct:
             out = self._apply_distinct_rows(out)
+        if stmt.order_by:
+            col, direction = stmt.order_by
+            reverse = direction.upper() == "DESC"
+            out.sort(key=lambda r: (r.get(col) is None, r.get(col)), reverse=reverse)
+        if stmt.limit is not None:
+            out = out[: stmt.limit]
         return out
 
     def _select_with_grouping(self, schema: TableSchema, rows: List[Dict[str, Any]], stmt: SelectStmt) -> List[Dict[str, Any]]:
@@ -537,14 +544,22 @@ class Executor:
                 base_expr, alias = self._split_alias(expr)
                 if self._is_aggregate_expr(base_expr):
                     out_row[alias] = self._eval_aggregate_expr(schema, group_rows, base_expr)
+                elif self._is_round_expr(base_expr):
+                    out_row[alias] = self._eval_round_expr(schema, group_rows, base_expr)
                 else:
                     col_idx = schema.column_index(base_expr)
                     out_row[alias] = group_rows[0]["values"][col_idx] if group_rows else None
+            if stmt.having and not self._matches_having(schema, stmt.table_name, group_rows, out_row, stmt.having):
+                continue
             out.append(out_row)
-        if stmt.having:
-            out = [row for row in out if self._matches_where_projected(row, stmt.having)]
         if stmt.distinct:
             out = self._apply_distinct_rows(out)
+        if stmt.order_by:
+            col, direction = stmt.order_by
+            reverse = direction.upper() == "DESC"
+            out.sort(key=lambda r: (r.get(col) is None, r.get(col)), reverse=reverse)
+        if stmt.limit is not None:
+            out = out[: stmt.limit]
         return out
 
     def _select_with_join(self, stmt: SelectStmt) -> List[Dict[str, Any]]:
@@ -694,6 +709,16 @@ class Executor:
                         group_matches = False
                         break
                     continue
+                if op.endswith("_SUBQUERY"):
+                    if not isinstance(raw_value, str):
+                        group_matches = False
+                        break
+                    scalar = self._execute_scalar_subquery_value(raw_value)
+                    compare_op = op[: -len("_SUBQUERY")]
+                    if not self._compare(left, compare_op, scalar):
+                        group_matches = False
+                        break
+                    continue
                 if op == "LIKE":
                     if left is None or not isinstance(raw_value, str):
                         group_matches = False
@@ -703,6 +728,47 @@ class Executor:
                         group_matches = False
                         break
                     continue
+                if not self._compare(left, op, raw_value):
+                    group_matches = False
+                    break
+            if group_matches:
+                return True
+        return False
+
+    def _matches_having(
+        self,
+        schema: TableSchema,
+        table_name: str,
+        group_rows: List[Dict[str, Any]],
+        projected_row: Dict[str, Any],
+        where: WhereClause,
+    ) -> bool:
+        for group in where.groups:
+            group_matches = True
+            for col_name, op, raw_value in group:
+                if col_name in projected_row:
+                    left = projected_row[col_name]
+                elif self._is_aggregate_expr(col_name):
+                    left = self._eval_aggregate_expr(schema, group_rows, col_name)
+                elif self._is_round_expr(col_name):
+                    left = self._eval_round_expr(schema, group_rows, col_name)
+                else:
+                    col_idx = schema.column_index(col_name)
+                    left = group_rows[0]["values"][col_idx] if group_rows else None
+
+                outer_context = self._outer_context_from_row(schema, table_name, group_rows[0]["values"] if group_rows else [])
+
+                if op.endswith("_SUBQUERY"):
+                    if not isinstance(raw_value, str):
+                        group_matches = False
+                        break
+                    scalar = self._execute_scalar_subquery_value(raw_value, outer_context=outer_context)
+                    compare_op = op[: -len("_SUBQUERY")]
+                    if not self._compare(left, compare_op, scalar):
+                        group_matches = False
+                        break
+                    continue
+
                 if not self._compare(left, op, raw_value):
                     group_matches = False
                     break
@@ -1067,10 +1133,11 @@ class Executor:
             return key_parts[0]
         return tuple(key_parts)
 
-    def _execute_subquery_values(self, subquery_sql: str) -> List[Any]:
+    def _execute_subquery_values(self, subquery_sql: str, outer_context: Optional[Dict[str, Any]] = None) -> List[Any]:
         from tinydb_engine.parser import parse
 
-        result = self.execute(parse(subquery_sql))
+        sql = self._substitute_outer_context(subquery_sql, outer_context)
+        result = self.execute(parse(sql))
         if not isinstance(result, list):
             raise ValueError("Subquery in IN must return rows")
         out: List[Any] = []
@@ -1081,6 +1148,42 @@ class Executor:
                 raise ValueError("Subquery in IN must return exactly one column")
             out.append(next(iter(row.values())))
         return out
+
+    def _execute_scalar_subquery_value(self, subquery_sql: str, outer_context: Optional[Dict[str, Any]] = None) -> Any:
+        values = self._execute_subquery_values(subquery_sql, outer_context=outer_context)
+        if len(values) != 1:
+            raise ValueError("Scalar subquery must return exactly one row")
+        return values[0]
+
+    def _outer_context_from_row(self, schema: TableSchema, table_name: str, values: Sequence[Any]) -> Dict[str, Any]:
+        context: Dict[str, Any] = {}
+        for idx, col in enumerate(schema.columns):
+            value = values[idx] if idx < len(values) else None
+            context[f"{table_name}.{col.name}"] = value
+        return context
+
+    def _substitute_outer_context(self, sql: str, outer_context: Optional[Dict[str, Any]]) -> str:
+        if not outer_context:
+            return sql
+
+        rewritten = sql
+        for key in sorted(outer_context.keys(), key=len, reverse=True):
+            value = self._sql_literal(outer_context[key])
+            rewritten = re.sub(
+                rf"(?<![A-Za-z0-9_\.]){re.escape(key)}(?![A-Za-z0-9_\.])",
+                value,
+                rewritten,
+            )
+        return rewritten
+
+    def _sql_literal(self, value: Any) -> str:
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if isinstance(value, str):
+            return "'" + value.replace("'", "''") + "'"
+        return str(value)
 
     def _estimate_plan_metrics(self, inner: Statement) -> Dict[str, float | int]:
         if not isinstance(inner, SelectStmt):
@@ -1134,6 +1237,9 @@ class Executor:
         upper = expr.upper()
         return upper.startswith("COUNT(") or upper.startswith("SUM(") or upper.startswith("AVG(") or upper.startswith("MIN(") or upper.startswith("MAX(")
 
+    def _is_round_expr(self, expr: str) -> bool:
+        return expr.upper().startswith("ROUND(")
+
     def _split_alias(self, expr: str) -> Tuple[str, str]:
         marker = " AS "
         upper_expr = expr.upper()
@@ -1157,6 +1263,13 @@ class Executor:
 
         if func == "COUNT" and arg == "*":
             return len(rows)
+
+        if func == "COUNT" and arg.upper().startswith("CASE"):
+            total = 0
+            for row in rows:
+                if self._eval_count_case_when(schema, row["values"], arg) is not None:
+                    total += 1
+            return total
 
         distinct_match = re.match(r"^DISTINCT\s*(.+)$", arg, flags=re.IGNORECASE)
         distinct_arg = False
@@ -1190,6 +1303,57 @@ class Executor:
         if func == "MAX":
             return max(values)
         raise ValueError(f"Unsupported aggregate function: {func}")
+
+    def _eval_count_case_when(self, schema: TableSchema, row_values: List[Any], case_expr: str) -> Any:
+        match = re.match(
+            r"^CASE\s+WHEN\s+(.+?)\s+THEN\s+(.+?)\s+END$",
+            case_expr,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            raise ValueError(f"Unsupported CASE expression in COUNT: {case_expr}")
+
+        cond_expr = match.group(1).strip()
+        then_expr = match.group(2).strip()
+        cond_match = re.match(r"^([A-Za-z_][A-Za-z0-9_\.]*)\s*(=|!=|<|<=|>|>=)\s*(.+)$", cond_expr)
+        if cond_match is None:
+            raise ValueError(f"Unsupported CASE WHEN condition: {cond_expr}")
+
+        left_col = cond_match.group(1)
+        op = cond_match.group(2)
+        right_token = cond_match.group(3).strip()
+
+        col_idx = schema.column_index(left_col)
+        left = row_values[col_idx]
+
+        from tinydb_engine.parser import _parse_literal
+
+        right_raw = _parse_literal(right_token)
+        right = coerce_value(right_raw, schema.columns[col_idx].data_type) if right_raw is not None else None
+        if not self._compare(left, op, right):
+            return None
+
+        then_val = _parse_literal(then_expr)
+        if then_val is None:
+            return None
+        return then_val
+
+    def _eval_round_expr(self, schema: TableSchema, rows: List[Dict[str, Any]], expr: str) -> Any:
+        match = re.match(r"^ROUND\((.+),\s*(-?\d+)\)$", expr, flags=re.IGNORECASE)
+        if match is None:
+            raise ValueError(f"Unsupported ROUND expression: {expr}")
+
+        inner_expr = match.group(1).strip()
+        digits = int(match.group(2))
+        if self._is_aggregate_expr(inner_expr):
+            value = self._eval_aggregate_expr(schema, rows, inner_expr)
+        else:
+            col_idx = schema.column_index(inner_expr)
+            value = rows[0]["values"][col_idx] if rows else None
+
+        if value is None:
+            return None
+        return round(float(value), digits)
 
     def _schema(self, table_name: str) -> TableSchema:
         key = table_name.lower()
@@ -1407,7 +1571,8 @@ class Executor:
                 if op == "IN_SUBQUERY":
                     if not isinstance(raw_value, str):
                         raise ValueError("IN subquery predicate requires subquery SQL")
-                    subquery_values = self._execute_subquery_values(raw_value)
+                    outer_context = self._outer_context_from_row(schema, schema.name, values)
+                    subquery_values = self._execute_subquery_values(raw_value, outer_context=outer_context)
                     right_values = [coerce_value(item, col.data_type) if item is not None else None for item in subquery_values]
                     if left not in right_values:
                         group_matches = False
@@ -1426,9 +1591,22 @@ class Executor:
                 if op == "NOT IN_SUBQUERY":
                     if not isinstance(raw_value, str):
                         raise ValueError("NOT IN subquery predicate requires subquery SQL")
-                    subquery_values = self._execute_subquery_values(raw_value)
+                    outer_context = self._outer_context_from_row(schema, schema.name, values)
+                    subquery_values = self._execute_subquery_values(raw_value, outer_context=outer_context)
                     right_values = [coerce_value(item, col.data_type) if item is not None else None for item in subquery_values]
                     if left in right_values:
+                        group_matches = False
+                        break
+                    continue
+
+                if op.endswith("_SUBQUERY"):
+                    if not isinstance(raw_value, str):
+                        raise ValueError("Subquery predicate requires subquery SQL")
+                    outer_context = self._outer_context_from_row(schema, schema.name, values)
+                    scalar = self._execute_scalar_subquery_value(raw_value, outer_context=outer_context)
+                    right = coerce_value(scalar, col.data_type) if scalar is not None else None
+                    compare_op = op[: -len("_SUBQUERY")]
+                    if not self._compare(left, compare_op, right):
                         group_matches = False
                         break
                     continue
@@ -1618,6 +1796,16 @@ class Executor:
                     continue
                 if op == "NOT IN_SUBQUERY":
                     if not isinstance(raw_value, str) or left in self._execute_subquery_values(raw_value):
+                        group_matches = False
+                        break
+                    continue
+                if op.endswith("_SUBQUERY"):
+                    if not isinstance(raw_value, str):
+                        group_matches = False
+                        break
+                    scalar = self._execute_scalar_subquery_value(raw_value)
+                    compare_op = op[: -len("_SUBQUERY")]
+                    if not self._compare(left, compare_op, scalar):
                         group_matches = False
                         break
                     continue

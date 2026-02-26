@@ -261,6 +261,103 @@ def test_count_distinct_aggregate(tmp_path):
         db.close()
 
 
+def test_count_case_when_expression(tmp_path):
+    db_path = tmp_path / "crud_count_case_when.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE bets (id INTEGER PRIMARY KEY, win INTEGER NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (1, 1)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (2, 0)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (3, 1)") == "OK"
+
+        rows = db.execute(
+            "SELECT COUNT(*) AS total, "
+            "COUNT(CASE WHEN win = 1 THEN 1 END) AS wins, "
+            "COUNT(CASE WHEN win = 0 THEN 1 END) AS losses "
+            "FROM bets"
+        )
+        assert rows == [{"total": 3, "wins": 2, "losses": 1}]
+    finally:
+        db.close()
+
+
+def test_round_aggregate_expression(tmp_path):
+    db_path = tmp_path / "crud_round_aggregate.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE bets (id INTEGER PRIMARY KEY, payout REAL, roll REAL)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (1, 1.111, 0.123456)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (2, 2.222, 0.654321)") == "OK"
+
+        rows = db.execute("SELECT ROUND(AVG(payout), 2) AS avg_payout, ROUND(AVG(roll), 4) AS avg_roll FROM bets")
+        assert rows == [{"avg_payout": 1.67, "avg_roll": 0.3889}]
+    finally:
+        db.close()
+
+
+def test_having_scalar_subquery_comparison(tmp_path):
+    db_path = tmp_path / "crud_having_scalar_subquery.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE bets (id INTEGER PRIMARY KEY, round_id INTEGER)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (1, 100)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (2, 100)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (3, 200)") == "OK"
+
+        rows = db.execute(
+            "SELECT round_id, COUNT(*) AS c "
+            "FROM bets "
+            "GROUP BY round_id "
+            "HAVING c = (SELECT COUNT(*) FROM bets)"
+        )
+        assert rows == []
+    finally:
+        db.close()
+
+
+def test_having_correlated_scalar_subquery_with_outer_reference(tmp_path):
+    db_path = tmp_path / "crud_having_correlated_scalar.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute(
+            "CREATE TABLE coinflip_bets ("
+            "id INTEGER PRIMARY KEY, "
+            "round_id INTEGER, "
+            "win INTEGER, "
+            "payout REAL, "
+            "roll REAL, "
+            "placed_at TIMESTAMP"
+            ")"
+        ) == "OK"
+
+        assert db.execute("INSERT INTO coinflip_bets VALUES (1, 10, 1, 2.0, 50.0, '2026-02-25 18:51:10')") == "OK"
+        assert db.execute("INSERT INTO coinflip_bets VALUES (2, 10, 0, 0.0, 40.0, '2026-02-25 18:51:20')") == "OK"
+        assert db.execute("INSERT INTO coinflip_bets VALUES (3, 11, 1, 1.0, 60.0, '2026-02-25 18:51:30')") == "OK"
+
+        rows = db.execute(
+            "SELECT COUNT(*) AS num_bets, "
+            "COUNT(CASE WHEN win = 1 THEN 1 END) AS num_wins, "
+            "COUNT(CASE WHEN win = 0 THEN 1 END) AS num_losses, "
+            "ROUND(AVG(payout), 2) AS avg_payout, "
+            "ROUND(AVG(roll), 4) AS avg_roll "
+            "FROM coinflip_bets "
+            "WHERE placed_at >= '2026-02-25 18:51:00' "
+            "AND placed_at < '2026-02-25 18:52:00' "
+            "GROUP BY round_id "
+            "HAVING COUNT(*) = (SELECT COUNT(*) "
+            "FROM coinflip_bets "
+            "WHERE round_id = coinflip_bets.round_id "
+            "AND placed_at >= '2026-02-25 18:51:00' "
+            "AND placed_at < '2026-02-25 18:52:00') "
+            "ORDER BY num_bets DESC "
+            "LIMIT 1"
+        )
+
+        assert rows == [{"num_bets": 2, "num_wins": 1, "num_losses": 1, "avg_payout": 1.0, "avg_roll": 45.0}]
+    finally:
+        db.close()
+
+
 def test_select_inner_join_basic(tmp_path):
     db_path = tmp_path / "crud_join_basic.db"
     db = TinyDB(str(db_path))
