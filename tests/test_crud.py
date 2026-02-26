@@ -40,6 +40,25 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_insert_or_replace_on_primary_key_conflict(tmp_path):
+    db_path = tmp_path / "crud_insert_or_replace.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT NOT NULL)") == "OK"
+        assert db.execute("CREATE INDEX idx_users_email ON users(email)") == "OK"
+
+        assert db.execute("INSERT INTO users VALUES (1, 'a@x.com', 'Alice')") == "OK"
+        assert db.execute("INSERT OR REPLACE INTO users VALUES (1, 'b@x.com', 'Alicia')") == "OK"
+
+        rows = db.execute("SELECT id, email, name FROM users ORDER BY id ASC")
+        assert rows == [{"id": 1, "email": "b@x.com", "name": "Alicia"}]
+
+        rows = db.execute("SELECT id FROM users WHERE email = 'a@x.com'")
+        assert rows == []
+    finally:
+        db.close()
+
+
 def test_select_distinct_support(tmp_path):
     db_path = tmp_path / "crud_distinct.db"
     db = TinyDB(str(db_path))

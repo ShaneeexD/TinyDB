@@ -21,6 +21,46 @@ def test_duplicate_primary_key_rejected(tmp_path):
         db.close()
 
 
+def test_check_constraint_enforced_on_insert_and_update(tmp_path):
+    db = TinyDB(str(tmp_path / "check.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, age INTEGER CHECK (age >= 0))")
+        db.execute("INSERT INTO users VALUES (1, 10)")
+
+        with pytest.raises(ValueError, match="CHECK constraint failed"):
+            db.execute("INSERT INTO users VALUES (2, -1)")
+
+        with pytest.raises(ValueError, match="CHECK constraint failed"):
+            db.execute("UPDATE users SET age = -5 WHERE id = 1")
+    finally:
+        db.close()
+
+
+def test_table_level_check_constraint(tmp_path):
+    db = TinyDB(str(tmp_path / "check_table.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, min_age INTEGER, max_age INTEGER, CHECK (min_age <= max_age))")
+        db.execute("INSERT INTO users VALUES (1, 10, 20)")
+
+        with pytest.raises(ValueError, match="CHECK constraint failed"):
+            db.execute("INSERT INTO users VALUES (2, 30, 20)")
+    finally:
+        db.close()
+
+
+def test_alter_add_column_check_constraint(tmp_path):
+    db = TinyDB(str(tmp_path / "check_alter.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+        db.execute("ALTER TABLE users ADD COLUMN score INTEGER CHECK (score >= 0)")
+        db.execute("INSERT INTO users (id, score) VALUES (1, 5)")
+
+        with pytest.raises(ValueError, match="CHECK constraint failed"):
+            db.execute("INSERT INTO users (id, score) VALUES (2, -1)")
+    finally:
+        db.close()
+
+
 def test_unique_constraint_enforced_on_insert_and_update(tmp_path):
     db = TinyDB(str(tmp_path / "unique.db"))
     try:

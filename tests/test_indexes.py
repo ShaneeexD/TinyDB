@@ -25,6 +25,38 @@ def test_create_index_on_unique_column_and_select(tmp_path):
         db.close()
 
 
+def test_create_composite_index_lookup_and_mutations(tmp_path):
+    db = TinyDB(str(tmp_path / "index_composite.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, region TEXT)")
+        db.execute("INSERT INTO users VALUES (1, 'Alice', 'NA')")
+        db.execute("INSERT INTO users VALUES (2, 'Alice', 'EU')")
+        db.execute("INSERT INTO users VALUES (3, 'Bob', 'NA')")
+
+        assert db.execute("CREATE INDEX idx_users_name_region ON users(name, region)") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE name = 'Alice' AND region = 'EU'")
+        assert rows == [{"id": 2}]
+
+        plan = db.execute("EXPLAIN SELECT id FROM users WHERE name = 'Alice' AND region = 'EU'")
+        assert plan == [{"plan": "SECONDARY INDEX LOOKUP"}]
+
+        rows = db.execute("SHOW INDEXES users")
+        assert {"index_name": "idx_users_name_region", "table_name": "users", "column_name": "name, region"} in rows
+
+        assert db.execute("UPDATE users SET region = 'APAC' WHERE id = 2") == 1
+        rows = db.execute("SELECT id FROM users WHERE name = 'Alice' AND region = 'EU'")
+        assert rows == []
+        rows = db.execute("SELECT id FROM users WHERE name = 'Alice' AND region = 'APAC'")
+        assert rows == [{"id": 2}]
+
+        assert db.execute("DELETE FROM users WHERE id = 2") == 1
+        rows = db.execute("SELECT id FROM users WHERE name = 'Alice' AND region = 'APAC'")
+        assert rows == []
+    finally:
+        db.close()
+
+
 def test_index_kept_consistent_on_update_and_delete(tmp_path):
     db = TinyDB(str(tmp_path / "index_mutations.db"))
     try:

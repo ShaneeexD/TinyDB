@@ -16,6 +16,7 @@ class ColumnDef:
     unique: bool = False
     default_value: Any = None
     auto_increment: bool = False
+    check_exprs: Sequence[str] = ()
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class CreateTableStmt:
     table_name: str
     columns: Sequence[ColumnDef]
     foreign_keys: Sequence[Tuple[str, str, str]]
+    check_exprs: Sequence[str] = ()
     if_not_exists: bool = False
 
 
@@ -37,6 +39,7 @@ class InsertStmt:
     table_name: str
     columns: Optional[Sequence[str]]
     values: Sequence[Sequence[Any]]
+    or_replace: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,7 +89,7 @@ class DropTableStmt:
 class CreateIndexStmt:
     index_name: str
     table_name: str
-    column_name: str
+    column_names: Sequence[str]
 
 
 @dataclass(frozen=True)

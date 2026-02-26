@@ -241,6 +241,7 @@ class BTreeIndex:
         raw = self.pager.read_page(page_id)
         (size,) = struct.unpack("<I", raw[:4])
         payload = json.loads(raw[4 : 4 + size].decode("utf-8")) if size else {}
+        keys = [self._normalize_key(item) for item in payload.get("keys", [])]
         values: List[Any] = []
         for item in payload.get("values", []):
             if isinstance(item, list) and item and isinstance(item[0], list):
@@ -251,10 +252,15 @@ class BTreeIndex:
                 values.append(item)
         return Node(
             is_leaf=payload.get("is_leaf", True),
-            keys=payload.get("keys", []),
+            keys=keys,
             children=payload.get("children", []),
             values=values,
         )
+
+    def _normalize_key(self, key: Any) -> Any:
+        if isinstance(key, list):
+            return tuple(self._normalize_key(item) for item in key)
+        return key
 
     def _write_node(self, page_id: int, node: Node) -> None:
         payload = json.dumps(

@@ -32,7 +32,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bHAVING\b|\bDISTINCT\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bHAVING\b|\bDISTINCT\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bREPLACE\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bCHECK\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|-?\d+\.\d+|-?\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -195,10 +195,12 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
         stream.expect("ON")
         table_name = stream.pop()
         stream.expect("(")
-        column_name = stream.pop()
+        column_names = [stream.pop()]
+        while stream.consume(","):
+            column_names.append(stream.pop())
         stream.expect(")")
         _assert_consumed(stream)
-        return CreateIndexStmt(index_name=index_name, table_name=table_name, column_name=column_name)
+        return CreateIndexStmt(index_name=index_name, table_name=table_name, column_names=column_names)
 
     stream.expect("TABLE")
     if_not_exists = False
@@ -211,6 +213,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
 
     columns: List[ColumnDef] = []
     foreign_keys: List[Tuple[str, str, str]] = []
+    check_exprs: List[str] = []
     while True:
         if stream.consume("FOREIGN"):
             stream.expect("KEY")
@@ -223,6 +226,8 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
             ref_column = stream.pop()
             stream.expect(")")
             foreign_keys.append((local_column, ref_table, ref_column))
+        elif stream.consume("CHECK"):
+            check_exprs.append(_parse_check_expression(stream))
         else:
             col_name = stream.pop()
             col_type = stream.pop().upper()
@@ -231,6 +236,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
             unique = False
             default_value: Any = None
             auto_increment = False
+            col_check_exprs: List[str] = []
             while True:
                 if stream.consume("PRIMARY"):
                     stream.expect("KEY")
@@ -254,6 +260,9 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
                 if stream.consume("DEFAULT"):
                     default_value = _parse_literal(stream.pop())
                     continue
+                if stream.consume("CHECK"):
+                    col_check_exprs.append(_parse_check_expression(stream))
+                    continue
                 break
             columns.append(
                 ColumnDef(
@@ -264,6 +273,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
                     unique=unique,
                     default_value=default_value,
                     auto_increment=auto_increment,
+                    check_exprs=col_check_exprs,
                 )
             )
 
@@ -277,12 +287,17 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
         table_name=table_name,
         columns=columns,
         foreign_keys=foreign_keys,
+        check_exprs=check_exprs,
         if_not_exists=if_not_exists,
     )
 
 
 def _parse_insert(stream: TokenStream) -> InsertStmt:
     stream.expect("INSERT")
+    or_replace = False
+    if stream.consume("OR"):
+        stream.expect("REPLACE")
+        or_replace = True
     stream.expect("INTO")
     table_name = stream.pop()
 
@@ -314,7 +329,7 @@ def _parse_insert(stream: TokenStream) -> InsertStmt:
         break
 
     _assert_consumed(stream)
-    return InsertStmt(table_name=table_name, columns=columns, values=values)
+    return InsertStmt(table_name=table_name, columns=columns, values=values, or_replace=or_replace)
 
 
 def _parse_select(stream: TokenStream) -> SelectStmt:
@@ -483,6 +498,7 @@ def _parse_alter(
         not_null = False
         unique = False
         default_value: Any = None
+        col_check_exprs: List[str] = []
         while True:
             if stream.consume("PRIMARY"):
                 stream.expect("KEY")
@@ -499,6 +515,9 @@ def _parse_alter(
             if stream.consume("DEFAULT"):
                 default_value = _parse_literal(stream.pop())
                 continue
+            if stream.consume("CHECK"):
+                col_check_exprs.append(_parse_check_expression(stream))
+                continue
             break
         _assert_consumed(stream)
         return AlterTableAddColumnStmt(
@@ -510,6 +529,7 @@ def _parse_alter(
                 not_null=not_null,
                 unique=unique,
                 default_value=default_value,
+                check_exprs=col_check_exprs,
             ),
         )
 
@@ -595,9 +615,9 @@ def _parse_literal(token: str) -> Any:
         return False
     if token.startswith("'") and token.endswith("'"):
         return token[1:-1].replace("''", "'")
-    if re.fullmatch(r"\d+\.\d+", token):
+    if re.fullmatch(r"-?\d+\.\d+", token):
         return float(token)
-    if re.fullmatch(r"\d+", token):
+    if re.fullmatch(r"-?\d+", token):
         return int(token)
     # Unquoted identifiers as literals are intentionally supported to keep UPDATE concise.
     return token
@@ -606,3 +626,19 @@ def _parse_literal(token: str) -> Any:
 def _assert_consumed(stream: TokenStream) -> None:
     if stream.peek() is not None:
         raise ParseError(f"Unexpected token: {stream.peek()}")
+
+
+def _parse_check_expression(stream: TokenStream) -> str:
+    stream.expect("(")
+    parts: List[str] = []
+    depth = 1
+    while depth > 0:
+        token = stream.pop()
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        parts.append(token)
+    return " ".join(parts)

@@ -57,6 +57,7 @@ SQL_KEYWORDS = {
     "ON",
     "PROFILE",
     "PRIMARY",
+    "REPLACE",
     "REMOVE",
     "RENAME",
     "ROLLBACK",
@@ -91,6 +92,7 @@ Use only syntax supported by tinydb_engine:
 - CREATE TABLE IF NOT EXISTS
 - FOREIGN KEY (col) REFERENCES other_table(other_col) inside CREATE TABLE
 - INSERT INTO ... VALUES (...) or INSERT INTO ... VALUES (...), (...)
+- INSERT OR REPLACE INTO ... VALUES (...)
 - SELECT [DISTINCT] ... [JOIN ... ON ...] [WHERE] [GROUP BY ...] [HAVING ...] [ORDER BY] [LIMIT]
 - UPDATE ... SET ... [WHERE]
 - DELETE FROM ... [WHERE]

@@ -98,7 +98,7 @@ class Executor:
                     {
                         "index_name": idx["name"],
                         "table_name": schema.name,
-                        "column_name": idx["column"],
+                        "column_name": ", ".join(self._index_columns(idx)),
                     }
                 )
         rows.sort(key=lambda r: (r["table_name"].lower(), r["index_name"].lower()))
@@ -169,8 +169,9 @@ class Executor:
         fk_by_col = {row["_key"]: row["foreign_key"] for row in rows}
         idx_by_col: Dict[str, List[str]] = {}
         for idx in schema.secondary_indexes or []:
-            key = str(idx["column"]).lower()
-            idx_by_col.setdefault(key, []).append(str(idx["name"]))
+            for col_name in self._index_columns(idx):
+                key = str(col_name).lower()
+                idx_by_col.setdefault(key, []).append(str(idx["name"]))
 
         out: List[Dict[str, Any]] = []
         for col in schema.columns:
@@ -203,6 +204,7 @@ class Executor:
                 not_null=col.not_null,
                 unique=col.unique,
                 auto_increment=col.auto_increment,
+                check_exprs=list(col.check_exprs),
                 default_value=(
                     coerce_value(col.default_value, normalize_type(col.data_type))
                     if col.default_value is not None
@@ -253,6 +255,7 @@ class Executor:
             pk_index_root_page=index.root_page_id,
             foreign_keys=foreign_keys,
             secondary_indexes=[],
+            check_exprs=list(stmt.check_exprs),
         )
         self.schemas[key] = schema
         self.catalog.save(self.schemas)
@@ -281,7 +284,7 @@ class Executor:
             raise ValueError("ALTER TABLE REMOVE COLUMN currently supports only the last column")
         if schema.secondary_indexes:
             for idx in schema.secondary_indexes:
-                if idx["column"].lower() == stmt.column_name.lower():
+                if any(col.lower() == stmt.column_name.lower() for col in self._index_columns(idx)):
                     raise ValueError("Cannot remove a column with an index")
 
         del schema.columns[remove_idx]
@@ -295,20 +298,26 @@ class Executor:
         if any(idx["name"].lower() == stmt.index_name.lower() for idx in schema.secondary_indexes):
             raise ValueError(f"Index already exists: {stmt.index_name}")
 
-        col_idx = schema.column_index(stmt.column_name)
-        col = schema.columns[col_idx]
+        if not stmt.column_names:
+            raise ValueError("CREATE INDEX requires at least one column")
+        col_names = [name for name in stmt.column_names]
+        if len({name.lower() for name in col_names}) != len(col_names):
+            raise ValueError("Duplicate column in index definition")
+        col_indices = [schema.column_index(name) for name in col_names]
+        normalized_col_names = [schema.columns[idx].name for idx in col_indices]
 
         btree = BTreeIndex.create(self.pager)
         for row in self._scan_rows(schema):
-            value = row["values"][col_idx]
-            if value is None:
+            key = self._index_key(row["values"], col_indices)
+            if key is None:
                 continue
-            btree.insert_non_unique(value, (row["page_id"], row["slot_id"]))
+            btree.insert_non_unique(key, (row["page_id"], row["slot_id"]))
 
         schema.secondary_indexes.append(
             {
                 "name": stmt.index_name,
-                "column": col.name,
+                "columns": normalized_col_names,
+                "column": normalized_col_names[0],
                 "root_page": btree.root_page_id,
             }
         )
@@ -348,8 +357,15 @@ class Executor:
 
         schema.columns[old_idx].name = stmt.new_column_name
         for idx in schema.secondary_indexes or []:
-            if idx["column"].lower() == stmt.old_column_name.lower():
-                idx["column"] = stmt.new_column_name
+            cols = self._index_columns(idx)
+            changed = False
+            for i, col in enumerate(cols):
+                if col.lower() == stmt.old_column_name.lower():
+                    cols[i] = stmt.new_column_name
+                    changed = True
+            if changed:
+                idx["columns"] = cols
+                idx["column"] = cols[0]
         self.catalog.save(self.schemas)
         return "OK"
 
@@ -377,6 +393,7 @@ class Executor:
                 not_null=False,
                 unique=stmt.column.unique,
                 default_value=default_value,
+                check_exprs=list(stmt.column.check_exprs),
             )
         )
         self.catalog.save(self.schemas)
@@ -397,21 +414,36 @@ class Executor:
                 pk_val = values[pk_idx]
                 if pk_val is None:
                     raise ValueError("PRIMARY KEY cannot be NULL")
-                if btree.find(pk_val) is not None:
-                    raise ValueError("Duplicate primary key")
+                existing_loc = btree.find(pk_val)
+                if existing_loc is not None:
+                    if not stmt.or_replace:
+                        raise ValueError("Duplicate primary key")
+
+                    existing_row = self._read_row_at(schema, existing_loc[0], existing_loc[1])
+                    if existing_row is not None:
+                        page = self.pager.read_page(existing_loc[0])
+                        page_obj = self._read_table_page(page)
+                        page_obj["slots"][existing_loc[1]]["deleted"] = True
+                        self.pager.write_page(existing_loc[0], self._write_table_page(page_obj))
+
+                        btree.delete(pk_val)
+                        for idx_meta, sec_btree in sec_btrees:
+                            key = self._index_key_for_meta(schema, existing_row, idx_meta)
+                            if key is not None:
+                                sec_btree.delete_non_unique(key, (existing_loc[0], existing_loc[1]))
 
             self._validate_foreign_keys(schema, values)
+            self._validate_check_constraints(schema, values)
             self._enforce_unique_constraints(schema, values)
 
             page_id, slot_id = self._insert_row(schema, values)
             if pk_idx is not None and btree is not None:
                 btree.insert(values[pk_idx], (page_id, slot_id))
             for idx_meta, sec_btree in sec_btrees:
-                col_idx = schema.column_index(idx_meta["column"])
-                idx_value = values[col_idx]
-                if idx_value is None:
+                key = self._index_key_for_meta(schema, values, idx_meta)
+                if key is None:
                     continue
-                sec_btree.insert_non_unique(idx_value, (page_id, slot_id))
+                sec_btree.insert_non_unique(key, (page_id, slot_id))
 
         if pk_idx is not None and btree is not None:
             schema.pk_index_root_page = btree.root_page_id
@@ -683,22 +715,42 @@ class Executor:
     def _select_secondary_index_fast_path(self, schema: TableSchema, stmt: SelectStmt) -> List[Dict[str, Any]] | None:
         if stmt.join_table is not None or stmt.where is None:
             return None
-        if len(stmt.where.groups) != 1 or len(stmt.where.groups[0]) != 1:
+        if len(stmt.where.groups) != 1:
             return None
 
-        col_name, op, raw_value = stmt.where.groups[0][0]
-        if op not in {"=", "IN"} or raw_value is None:
-            return None
-
+        predicates = stmt.where.groups[0]
         for idx_meta in schema.secondary_indexes or []:
-            if idx_meta["column"].lower() != col_name.lower():
-                continue
-            col_idx = schema.column_index(idx_meta["column"])
-            typed_values = (
-                [coerce_value(raw_value, schema.columns[col_idx].data_type)]
-                if op == "="
-                else [coerce_value(item, schema.columns[col_idx].data_type) for item in (raw_value or [])]
-            )
+            col_names = self._index_columns(idx_meta)
+            if len(col_names) == 1:
+                col_name, op, raw_value = predicates[0]
+                if len(predicates) != 1 or op not in {"=", "IN"} or raw_value is None:
+                    continue
+                if col_names[0].lower() != col_name.lower():
+                    continue
+                col_idx = schema.column_index(col_names[0])
+                typed_values = (
+                    [coerce_value(raw_value, schema.columns[col_idx].data_type)]
+                    if op == "="
+                    else [coerce_value(item, schema.columns[col_idx].data_type) for item in (raw_value or [])]
+                )
+            else:
+                if len(predicates) != len(col_names):
+                    continue
+                pred_map: Dict[str, Any] = {}
+                valid = True
+                for pred_col, pred_op, pred_val in predicates:
+                    if pred_op != "=" or pred_val is None or pred_col.lower() in pred_map:
+                        valid = False
+                        break
+                    pred_map[pred_col.lower()] = pred_val
+                if not valid or any(name.lower() not in pred_map for name in col_names):
+                    continue
+                typed_key: List[Any] = []
+                for name in col_names:
+                    col_idx = schema.column_index(name)
+                    typed_key.append(coerce_value(pred_map[name.lower()], schema.columns[col_idx].data_type))
+                typed_values = [tuple(typed_key)]
+
             btree = BTreeIndex(self.pager, int(idx_meta["root_page"]))
             out: List[Dict[str, Any]] = []
             seen: set[Tuple[int, int]] = set()
@@ -712,6 +764,7 @@ class Executor:
                         continue
                     out.append({"page_id": page_id, "slot_id": slot_id, "values": row_values})
             return out
+
         return None
 
     def _update(self, stmt: UpdateStmt) -> int:
@@ -743,6 +796,7 @@ class Executor:
                     raise ValueError("Duplicate primary key")
 
             self._validate_foreign_keys(schema, new_values)
+            self._validate_check_constraints(schema, new_values)
             self._enforce_unique_constraints(schema, new_values, skip_row=(row["page_id"], row["slot_id"]))
 
             page = self.pager.read_page(row["page_id"])
@@ -756,13 +810,12 @@ class Executor:
                 btree.insert(new_values[pk_idx], (new_page, new_slot))
                 schema.pk_index_root_page = btree.root_page_id
             for idx_meta, sec_btree in sec_btrees:
-                col_idx = schema.column_index(idx_meta["column"])
-                old_val = row["values"][col_idx]
-                new_val = new_values[col_idx]
-                if old_val is not None:
-                    sec_btree.delete_non_unique(old_val, (row["page_id"], row["slot_id"]))
-                if new_val is not None:
-                    sec_btree.insert_non_unique(new_val, (new_page, new_slot))
+                old_key = self._index_key_for_meta(schema, row["values"], idx_meta)
+                new_key = self._index_key_for_meta(schema, new_values, idx_meta)
+                if old_key is not None:
+                    sec_btree.delete_non_unique(old_key, (row["page_id"], row["slot_id"]))
+                if new_key is not None:
+                    sec_btree.insert_non_unique(new_key, (new_page, new_slot))
             affected += 1
 
         if affected:
@@ -786,6 +839,56 @@ class Executor:
                     f"FOREIGN KEY constraint failed: {schema.name}.{fk['column']} references "
                     f"{ref_schema.name}.{fk['ref_column']}"
                 )
+
+    def _validate_check_constraints(self, schema: TableSchema, values: List[Any]) -> None:
+        row_map = {col.name: values[idx] for idx, col in enumerate(schema.columns)}
+
+        for expr in schema.check_exprs or []:
+            if not self._evaluate_check_expr(schema, row_map, expr):
+                raise ValueError(f"CHECK constraint failed: {expr}")
+
+        for idx, col in enumerate(schema.columns):
+            for expr in col.check_exprs or []:
+                if not self._evaluate_check_expr(schema, row_map, expr):
+                    raise ValueError(f"CHECK constraint failed: {col.name}: {expr}")
+
+    def _evaluate_check_expr(self, schema: TableSchema, row_map: Dict[str, Any], expr: str) -> bool:
+        match = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|!=|=|<|>)\s*(.+?)\s*", expr)
+        if match is None:
+            raise ValueError(f"Unsupported CHECK expression: {expr}")
+
+        left_name, op, right_token = match.groups()
+        left_col = next((c for c in schema.columns if c.name.lower() == left_name.lower()), None)
+        if left_col is None:
+            raise ValueError(f"Unknown CHECK column: {left_name}")
+        left = row_map.get(left_col.name)
+
+        right: Any
+        right_col = next((c for c in schema.columns if c.name.lower() == right_token.lower()), None)
+        if right_col is not None:
+            right = row_map.get(right_col.name)
+        else:
+            right = self._parse_check_literal(right_token)
+            if right is not None:
+                right = coerce_value(right, left_col.data_type)
+
+        return self._compare(left, op, right)
+
+    def _parse_check_literal(self, token: str) -> Any:
+        upper = token.upper()
+        if upper == "NULL":
+            return None
+        if upper == "TRUE":
+            return True
+        if upper == "FALSE":
+            return False
+        if token.startswith("'") and token.endswith("'"):
+            return token[1:-1].replace("''", "'")
+        if re.fullmatch(r"\d+\.\d+", token):
+            return float(token)
+        if re.fullmatch(r"\d+", token):
+            return int(token)
+        return token
 
     def _assert_not_referenced(self, schema: TableSchema, row_values: List[Any]) -> None:
         for child_schema in self.schemas.values():
@@ -824,10 +927,9 @@ class Executor:
                 btree.delete(row["values"][pk_idx])
                 schema.pk_index_root_page = btree.root_page_id
             for idx_meta, sec_btree in sec_btrees:
-                col_idx = schema.column_index(idx_meta["column"])
-                old_val = row["values"][col_idx]
-                if old_val is not None:
-                    sec_btree.delete_non_unique(old_val, (row["page_id"], row["slot_id"]))
+                old_key = self._index_key_for_meta(schema, row["values"], idx_meta)
+                if old_key is not None:
+                    sec_btree.delete_non_unique(old_key, (row["page_id"], row["slot_id"]))
             affected += 1
 
         if affected:
@@ -846,7 +948,28 @@ class Executor:
     def _can_use_index_for_order(self, schema: TableSchema, col_name: str) -> bool:
         if schema.pk_column and schema.pk_column.name.lower() == col_name.lower():
             return True
-        return any(idx["column"].lower() == col_name.lower() for idx in (schema.secondary_indexes or []))
+        return any(len(self._index_columns(idx)) == 1 and self._index_columns(idx)[0].lower() == col_name.lower() for idx in (schema.secondary_indexes or []))
+
+    def _index_columns(self, idx_meta: Dict[str, Any]) -> List[str]:
+        cols = idx_meta.get("columns")
+        if isinstance(cols, list) and cols:
+            return [str(c) for c in cols]
+        legacy = idx_meta.get("column")
+        if legacy is None:
+            return []
+        return [str(legacy)]
+
+    def _index_key(self, values: Sequence[Any], col_indices: Sequence[int]) -> Any:
+        key_values = [values[i] for i in col_indices]
+        if any(v is None for v in key_values):
+            return None
+        if len(key_values) == 1:
+            return key_values[0]
+        return tuple(key_values)
+
+    def _index_key_for_meta(self, schema: TableSchema, values: Sequence[Any], idx_meta: Dict[str, Any]) -> Any:
+        col_indices = [schema.column_index(name) for name in self._index_columns(idx_meta)]
+        return self._index_key(values, col_indices)
 
     def _is_aggregate_expr(self, expr: str) -> bool:
         upper = expr.upper()

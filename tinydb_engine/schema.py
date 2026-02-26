@@ -17,6 +17,7 @@ class ColumnSchema:
     unique: bool = False
     default_value: Any = None
     auto_increment: bool = False
+    check_exprs: List[str] | None = None
 
 
 @dataclass
@@ -27,6 +28,7 @@ class TableSchema:
     pk_index_root_page: int
     foreign_keys: List[dict[str, str]] | None = None
     secondary_indexes: List[dict[str, Any]] | None = None
+    check_exprs: List[str] | None = None
 
     @property
     def pk_column(self) -> Optional[ColumnSchema]:
@@ -105,6 +107,7 @@ def serialize_schema_map(schema_map: Dict[str, TableSchema]) -> Dict[str, Any]:
                     "unique": col.unique,
                     "default_value": col.default_value,
                     "auto_increment": col.auto_increment,
+                    "check_exprs": list(col.check_exprs or []),
                 }
                 for col in schema.columns
             ],
@@ -112,6 +115,7 @@ def serialize_schema_map(schema_map: Dict[str, TableSchema]) -> Dict[str, Any]:
             "pk_index_root_page": schema.pk_index_root_page,
             "foreign_keys": list(schema.foreign_keys or []),
             "secondary_indexes": list(schema.secondary_indexes or []),
+            "check_exprs": list(schema.check_exprs or []),
         }
         for name, schema in schema_map.items()
     }
@@ -127,5 +131,6 @@ def deserialize_schema_map(payload: Dict[str, Any]) -> Dict[str, TableSchema]:
             pk_index_root_page=int(table["pk_index_root_page"]),
             foreign_keys=[dict(item) for item in table.get("foreign_keys", [])],
             secondary_indexes=[dict(item) for item in table.get("secondary_indexes", [])],
+            check_exprs=list(table.get("check_exprs", [])),
         )
     return output
