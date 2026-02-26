@@ -82,6 +82,29 @@ def test_parse_where_not_in_select_subquery():
     assert stmt.where.groups == [[("id", "NOT IN_SUBQUERY", "SELECT user_id FROM memberships")]]
 
 
+def test_parse_select_with_table_aliases():
+    stmt = parse(
+        "SELECT c.username, c.amount, r.id AS round_id "
+        "FROM coinflip_bets c "
+        "JOIN coinflip_rounds r ON c.round_id = r.id "
+        "WHERE c.win = TRUE "
+        "ORDER BY c.resolved_at DESC "
+        "LIMIT 10"
+    )
+    assert stmt.columns == [
+        "coinflip_bets.username",
+        "coinflip_bets.amount",
+        "coinflip_rounds.id AS round_id",
+    ]
+    assert stmt.join_table == "coinflip_rounds"
+    assert stmt.join_left_column == "coinflip_bets.round_id"
+    assert stmt.join_right_column == "coinflip_rounds.id"
+    assert stmt.where is not None
+    assert stmt.where.groups == [[("coinflip_bets.win", "=", True)]]
+    assert stmt.order_by == ("coinflip_bets.resolved_at", "DESC")
+    assert stmt.limit == 10
+
+
 def test_parse_error_includes_line_and_column():
     with pytest.raises(ParseError) as exc_info:
         parse("SELECT id\nFROM users\nWHERE name = @bad")

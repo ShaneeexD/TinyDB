@@ -32,7 +32,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bHAVING\b|\bDISTINCT\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bREPLACE\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bCHECK\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|-?\d+\.\d+|-?\d+|[(),=*<>.+/\-]|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bINNER\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bHAVING\b|\bDISTINCT\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bREPLACE\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bCHECK\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|-?\d+\.\d+|-?\d+|[(),=*<>.+/\-]|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -96,6 +96,49 @@ def _parse_select_expression(stream: TokenStream) -> str:
             depth -= 1
         expr_parts.append(part)
     return "".join(expr_parts)
+
+
+def _parse_optional_table_alias(stream: TokenStream) -> str | None:
+    if stream.consume("AS"):
+        return stream.pop()
+    token = stream.peek()
+    if token is None:
+        return None
+    upper = token.upper()
+    if upper in {
+        "JOIN",
+        "INNER",
+        "LEFT",
+        "ON",
+        "WHERE",
+        "GROUP",
+        "HAVING",
+        "ORDER",
+        "LIMIT",
+        "AND",
+        "OR",
+    }:
+        return None
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token):
+        return stream.pop()
+    return None
+
+
+def _rewrite_identifier_alias(identifier: str, alias_map: dict[str, str]) -> str:
+    if "." not in identifier:
+        return identifier
+    prefix, rest = identifier.split(".", 1)
+    table_name = alias_map.get(prefix.lower())
+    if table_name is None:
+        return identifier
+    return f"{table_name}.{rest}"
+
+
+def _rewrite_select_expr_aliases(expr: str, alias_map: dict[str, str]) -> str:
+    out = expr
+    for alias, table_name in alias_map.items():
+        out = re.sub(rf"\b{re.escape(alias)}\.", f"{table_name}.", out)
+    return out
 
 
 def tokenize(sql: str) -> List[str]:
@@ -361,6 +404,10 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
 
     stream.expect("FROM")
     table_name = _parse_identifier(stream)
+    alias_map: dict[str, str] = {}
+    base_alias = _parse_optional_table_alias(stream)
+    if base_alias is not None:
+        alias_map[base_alias.lower()] = table_name
 
     joins: List[JoinClause] = []
     while True:
@@ -368,16 +415,22 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
         if stream.consume("LEFT"):
             join_type = "LEFT"
             stream.expect("JOIN")
+        elif stream.consume("INNER"):
+            join_type = "INNER"
+            stream.expect("JOIN")
         elif stream.consume("JOIN"):
             join_type = "INNER"
         else:
             break
 
         join_table = _parse_identifier(stream)
+        join_alias = _parse_optional_table_alias(stream)
+        if join_alias is not None:
+            alias_map[join_alias.lower()] = join_table
         stream.expect("ON")
-        join_left_column = _parse_identifier(stream)
+        join_left_column = _rewrite_identifier_alias(_parse_identifier(stream), alias_map)
         stream.expect("=")
-        join_right_column = _parse_identifier(stream)
+        join_right_column = _rewrite_identifier_alias(_parse_identifier(stream), alias_map)
         joins.append(
             JoinClause(
                 join_type=join_type,
@@ -406,7 +459,7 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     order_by = None
     if stream.consume("ORDER"):
         stream.expect("BY")
-        col = _parse_identifier(stream)
+        col = _rewrite_identifier_alias(_parse_identifier(stream), alias_map)
         direction = "ASC"
         next_tok = stream.peek()
         if next_tok and next_tok.upper() in {"ASC", "DESC"}:
@@ -416,6 +469,25 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     limit = None
     if stream.consume("LIMIT"):
         limit = int(stream.pop())
+
+    if alias_map:
+        columns = [_rewrite_select_expr_aliases(col, alias_map) for col in columns]
+        if where is not None:
+            where = WhereClause(
+                groups=[
+                    [(_rewrite_identifier_alias(col, alias_map), op, value) for col, op, value in group]
+                    for group in where.groups
+                ]
+            )
+        if group_by is not None:
+            group_by = [_rewrite_identifier_alias(col, alias_map) for col in group_by]
+        if having is not None:
+            having = WhereClause(
+                groups=[
+                    [(_rewrite_identifier_alias(col, alias_map), op, value) for col, op, value in group]
+                    for group in having.groups
+                ]
+            )
 
     _assert_consumed(stream)
     return SelectStmt(
