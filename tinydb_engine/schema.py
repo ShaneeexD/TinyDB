@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -72,6 +73,8 @@ def coerce_value(value: Any, data_type: str) -> Any:
         if isinstance(value, bytearray):
             return bytes(value)
         if isinstance(value, str):
+            if value.startswith("__tinydb_blob_b64__:"):
+                return base64.b64decode(value[len("__tinydb_blob_b64__:") :])
             return value.encode("utf-8")
         raise ValueError(f"Cannot coerce '{value}' to BLOB")
     if data_type == "DECIMAL":
@@ -105,7 +108,7 @@ def serialize_schema_map(schema_map: Dict[str, TableSchema]) -> Dict[str, Any]:
                     "primary_key": col.primary_key,
                     "not_null": col.not_null,
                     "unique": col.unique,
-                    "default_value": col.default_value,
+                    "default_value": _serialize_schema_value(col.default_value),
                     "auto_increment": col.auto_increment,
                     "check_exprs": list(col.check_exprs or []),
                 }
@@ -126,7 +129,15 @@ def deserialize_schema_map(payload: Dict[str, Any]) -> Dict[str, TableSchema]:
     for name, table in payload.items():
         output[name] = TableSchema(
             name=table["name"],
-            columns=[ColumnSchema(**col) for col in table["columns"]],
+            columns=[
+                ColumnSchema(
+                    **{
+                        **col,
+                        "default_value": _deserialize_schema_value(col.get("default_value")),
+                    }
+                )
+                for col in table["columns"]
+            ],
             data_page_ids=list(table["data_page_ids"]),
             pk_index_root_page=int(table["pk_index_root_page"]),
             foreign_keys=[dict(item) for item in table.get("foreign_keys", [])],
@@ -134,3 +145,22 @@ def deserialize_schema_map(payload: Dict[str, Any]) -> Dict[str, TableSchema]:
             check_exprs=list(table.get("check_exprs", [])),
         )
     return output
+
+
+def _serialize_schema_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return {"__type__": "decimal", "value": str(value)}
+    if isinstance(value, (bytes, bytearray)):
+        return {"__type__": "bytes", "value": base64.b64encode(bytes(value)).decode("ascii")}
+    return value
+
+
+def _deserialize_schema_value(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    marker = value.get("__type__")
+    if marker == "decimal":
+        return Decimal(str(value.get("value")))
+    if marker == "bytes":
+        return base64.b64decode(str(value.get("value", "")))
+    return value

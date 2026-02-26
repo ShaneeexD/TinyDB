@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from decimal import Decimal
 from typing import Any, Sequence
 
@@ -93,9 +94,8 @@ class TinyDB:
         if isinstance(value, Decimal):
             return f"'{str(value)}'"
         if isinstance(value, (bytes, bytearray)):
-            text = bytes(value).decode("utf-8")
-            text = text.replace("'", "''")
-            return f"'{text}'"
+            b64 = base64.b64encode(bytes(value)).decode("ascii")
+            return f"'__tinydb_blob_b64__:{b64}'"
         if isinstance(value, (int, float)):
             return str(value)
 

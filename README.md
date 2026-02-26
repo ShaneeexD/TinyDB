@@ -19,7 +19,7 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
   - `ALTER TABLE ... RENAME COLUMN ... TO ...`
   - `ALTER TABLE ... ADD COLUMN ...`
   - `ALTER TABLE ... REMOVE COLUMN ...`
-  - `CREATE INDEX ... ON table_name(column_name)`
+  - `CREATE INDEX ... ON table_name(column_name[, column_name ...])`
   - `DROP INDEX index_name`
   - `SHOW TABLES`
   - `SHOW INDEXES [table_name]`
@@ -27,7 +27,7 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
   - `EXPLAIN SELECT ...`
   - `BEGIN`, `COMMIT`, `ROLLBACK`
 - Data types:
-  - `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`
+  - `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`, `BLOB`, `DECIMAL` (`NUMERIC` alias)
 - Constraints:
   - single-column `PRIMARY KEY`
   - `INTEGER PRIMARY KEY AUTOINCREMENT`
@@ -181,3 +181,4 @@ run_gui.bat app.db
 - Joins: chained `JOIN` and `LEFT JOIN` (equality `ON`).
 - Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`, `HAVING`).
 - Types: `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`, `BLOB`, `DECIMAL` (`NUMERIC` alias).
+- Binary-safe BLOB inserts are best done with parameter binding (`?`) so arbitrary bytes are preserved.
