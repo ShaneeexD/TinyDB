@@ -29,13 +29,14 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
 - Data types:
   - `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`, `BLOB`, `DECIMAL` (`NUMERIC` alias)
 - Constraints:
-  - single-column `PRIMARY KEY`
+  - `PRIMARY KEY` (single-column and table-level composite, e.g. `PRIMARY KEY (user_id, org_id)`)
   - `INTEGER PRIMARY KEY AUTOINCREMENT`
   - `NOT NULL`
   - `FOREIGN KEY (col) REFERENCES other_table(other_col)`
   - Note: `ALTER TABLE ... ADD COLUMN` currently allows nullable, non-PK columns only.
   - Note: `ALTER TABLE ... REMOVE COLUMN` currently supports removing only the last non-PK column.
 - Primary key B-tree index (with PK equality lookup fast path)
+- Header metadata overflow handling (large schema/index metadata spills into overflow pages)
 - WAL-based crash recovery
 - Python API + interactive REPL CLI
 
@@ -130,7 +131,7 @@ These commands are useful for inspecting and profiling your database quickly:
 - `DESCRIBE table_name`  
   Shows column metadata (type, PK, NULL, default, FK, indexes).
 - `EXPLAIN SELECT ...`  
-  Shows the chosen plan label (e.g. PK lookup, secondary index lookup, full scan).
+  Shows the chosen plan label plus basic estimates (`estimated_rows`, `estimated_cost`).
 - `PROFILE SELECT ...`  
   Runs the query and returns timing + row count + plan.
 
@@ -177,8 +178,8 @@ run_gui.bat app.db
 ## Notes
 
 - Transactions: implicit per statement, or explicit `BEGIN` / `COMMIT` / `ROLLBACK`.
-- Supported predicates: `AND`, `OR`, `IN`, `NOT IN`, `LIKE`, `IS NULL`, `IS NOT NULL`.
-- Joins: chained `JOIN` and `LEFT JOIN` (equality `ON`).
+- Supported predicates: `AND`, `OR`, `IN`, `NOT IN`, `IN (SELECT ...)`, `NOT IN (SELECT ...)`, `LIKE`, `IS NULL`, `IS NOT NULL`.
+- Joins: chained `JOIN`, `INNER JOIN`, and `LEFT JOIN` (equality `ON`) with optional table aliases.
 - Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`, `HAVING`).
 - Types: `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`, `BLOB`, `DECIMAL` (`NUMERIC` alias).
 - Binary-safe BLOB inserts are best done with parameter binding (`?`) so arbitrary bytes are preserved.
