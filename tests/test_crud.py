@@ -40,6 +40,42 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_select_distinct_support(tmp_path):
+    db_path = tmp_path / "crud_distinct.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Alice')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (3, 'Bob')") == "OK"
+
+        rows = db.execute("SELECT DISTINCT name FROM users ORDER BY name ASC")
+        assert rows == [{"name": "Alice"}, {"name": "Bob"}]
+    finally:
+        db.close()
+
+
+def test_group_by_having_support(tmp_path):
+    db_path = tmp_path / "crud_having.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE games (id INTEGER PRIMARY KEY, player TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO games VALUES (1, 'A')") == "OK"
+        assert db.execute("INSERT INTO games VALUES (2, 'A')") == "OK"
+        assert db.execute("INSERT INTO games VALUES (3, 'B')") == "OK"
+
+        rows = db.execute(
+            "SELECT player, COUNT(*) AS total "
+            "FROM games "
+            "GROUP BY player "
+            "HAVING total >= 2 "
+            "ORDER BY player ASC"
+        )
+        assert rows == [{"player": "A", "total": 2}]
+    finally:
+        db.close()
+
+
 def test_create_table_if_not_exists(tmp_path):
     db_path = tmp_path / "crud_if_not_exists.db"
     db = TinyDB(str(db_path))

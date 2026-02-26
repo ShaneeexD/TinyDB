@@ -32,7 +32,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|[(),=*<>.]|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bHAVING\b|\bDISTINCT\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|\d+\.\d+|\d+|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -112,7 +112,10 @@ def tokenize(sql: str) -> List[str]:
         match = _TOKEN_RE.match(cleaned, pos)
         if match is None:
             snippet = cleaned[pos : pos + 24]
-            raise ParseError(f"Unsupported SQL syntax near: {snippet!r}")
+            line = cleaned.count("\n", 0, pos) + 1
+            line_start = cleaned.rfind("\n", 0, pos) + 1
+            col = pos - line_start + 1
+            raise ParseError(f"Unsupported SQL syntax at line {line}, col {col} near: {snippet!r}")
         tokens.append(match.group(1))
         pos = match.end()
 
@@ -316,6 +319,7 @@ def _parse_insert(stream: TokenStream) -> InsertStmt:
 
 def _parse_select(stream: TokenStream) -> SelectStmt:
     stream.expect("SELECT")
+    distinct = stream.consume("DISTINCT")
     columns: List[str] = []
     if stream.consume("*"):
         columns = ["*"]
@@ -370,6 +374,10 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
                 continue
             break
 
+    having = None
+    if stream.consume("HAVING"):
+        having = _parse_predicate_groups(stream)
+
     order_by = None
     if stream.consume("ORDER"):
         stream.expect("BY")
@@ -388,6 +396,7 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
     return SelectStmt(
         table_name=table_name,
         columns=columns,
+        distinct=distinct,
         join_type=joins[0].join_type if joins else "INNER",
         join_table=joins[0].table_name if joins else None,
         join_left_column=joins[0].left_column if joins else None,
@@ -395,6 +404,7 @@ def _parse_select(stream: TokenStream) -> SelectStmt:
         joins=joins or None,
         where=where,
         group_by=group_by,
+        having=having,
         order_by=order_by,
         limit=limit,
     )
@@ -516,10 +526,14 @@ def _parse_where(stream: TokenStream) -> WhereClause | None:
     if not stream.consume("WHERE"):
         return None
 
+    return _parse_predicate_groups(stream)
+
+
+def _parse_predicate_groups(stream: TokenStream) -> WhereClause:
     groups: List[List[Tuple[str, str, Any]]] = []
     current_group: List[Tuple[str, str, Any]] = []
     while True:
-        col = _parse_identifier(stream)
+        col = _parse_select_expression(stream)
         op = stream.pop().upper()
 
         if op == "IS":

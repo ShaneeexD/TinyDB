@@ -11,7 +11,7 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
 - SQL-like commands:
   - `CREATE TABLE` (supports `IF NOT EXISTS`)
   - `INSERT INTO ... VALUES`
-  - `SELECT ... [WHERE] [ORDER BY] [LIMIT]`
+  - `SELECT [DISTINCT] ... [WHERE] [GROUP BY ...] [HAVING ...] [ORDER BY] [LIMIT]`
   - `UPDATE ... SET ... [WHERE]`
   - `DELETE FROM ... [WHERE]`
   - `DROP TABLE ...`
@@ -179,5 +179,5 @@ run_gui.bat app.db
 - Transactions: implicit per statement, or explicit `BEGIN` / `COMMIT` / `ROLLBACK`.
 - Supported predicates: `AND`, `OR`, `IN`, `NOT IN`, `LIKE`, `IS NULL`, `IS NOT NULL`.
 - Joins: chained `JOIN` and `LEFT JOIN` (equality `ON`).
-- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`).
+- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`, `HAVING`).
 - Types: `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`, `BLOB`, `DECIMAL` (`NUMERIC` alias).

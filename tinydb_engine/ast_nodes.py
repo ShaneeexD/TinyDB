@@ -43,6 +43,7 @@ class InsertStmt:
 class SelectStmt:
     table_name: str
     columns: Sequence[str]
+    distinct: bool = False
     join_type: str = "INNER"
     join_table: Optional[str] = None
     join_left_column: Optional[str] = None
@@ -50,6 +51,7 @@ class SelectStmt:
     joins: Optional[Sequence["JoinClause"]] = None
     where: Optional[WhereClause] = None
     group_by: Optional[Sequence[str]] = None
+    having: Optional[WhereClause] = None
     order_by: Optional[Tuple[str, str]] = None
     limit: Optional[int] = None
 

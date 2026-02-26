@@ -36,8 +36,11 @@ SQL_KEYWORDS = {
     "DROP",
     "EXPLAIN",
     "DESC",
+    "DISTINCT",
     "FALSE",
     "FROM",
+    "GROUP",
+    "HAVING",
     "IS",
     "IN",
     "INDEX",
@@ -88,7 +91,7 @@ Use only syntax supported by tinydb_engine:
 - CREATE TABLE IF NOT EXISTS
 - FOREIGN KEY (col) REFERENCES other_table(other_col) inside CREATE TABLE
 - INSERT INTO ... VALUES (...) or INSERT INTO ... VALUES (...), (...)
-- SELECT ... [JOIN ... ON ...] [WHERE] [ORDER BY] [LIMIT]
+- SELECT [DISTINCT] ... [JOIN ... ON ...] [WHERE] [GROUP BY ...] [HAVING ...] [ORDER BY] [LIMIT]
 - UPDATE ... SET ... [WHERE]
 - DELETE FROM ... [WHERE]
 - DROP TABLE ...

@@ -454,12 +454,18 @@ class Executor:
 
         if stmt.columns == ["*"]:
             col_names = [col.name for col in schema.columns]
-            return [dict(zip(col_names, row["values"])) for row in rows]
+            out = [dict(zip(col_names, row["values"])) for row in rows]
+            if stmt.distinct:
+                out = self._apply_distinct_rows(out)
+            return out
 
         exprs = [self._split_alias(name) for name in stmt.columns]
         indices = [schema.column_index(expr) for expr, _ in exprs]
         aliases = [alias for _, alias in exprs]
-        return [{a: row["values"][i] for a, i in zip(aliases, indices)} for row in rows]
+        out = [{a: row["values"][i] for a, i in zip(aliases, indices)} for row in rows]
+        if stmt.distinct:
+            out = self._apply_distinct_rows(out)
+        return out
 
     def _select_with_grouping(self, schema: TableSchema, rows: List[Dict[str, Any]], stmt: SelectStmt) -> List[Dict[str, Any]]:
         if stmt.columns == ["*"]:
@@ -486,6 +492,10 @@ class Executor:
                     col_idx = schema.column_index(base_expr)
                     out_row[alias] = group_rows[0]["values"][col_idx] if group_rows else None
             out.append(out_row)
+        if stmt.having:
+            out = [row for row in out if self._matches_where_projected(row, stmt.having)]
+        if stmt.distinct:
+            out = self._apply_distinct_rows(out)
         return out
 
     def _select_with_join(self, stmt: SelectStmt) -> List[Dict[str, Any]]:
@@ -582,7 +592,64 @@ class Executor:
                 key = self._resolve_join_column_key_multi(expr, all_schemas)
                 out_row[alias] = row.get(key)
             out.append(out_row)
+        if stmt.distinct:
+            out = self._apply_distinct_rows(out)
         return out
+
+    def _apply_distinct_rows(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen: set[Tuple[Tuple[str, Any], ...]] = set()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            key = tuple(sorted(row.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+        return out
+
+    def _matches_where_projected(self, row: Dict[str, Any], where: WhereClause) -> bool:
+        for group in where.groups:
+            group_matches = True
+            for col_name, op, raw_value in group:
+                if col_name not in row:
+                    raise ValueError(f"Unknown HAVING column/expression: {col_name}")
+                left = row[col_name]
+
+                if op == "IS NULL":
+                    if left is not None:
+                        group_matches = False
+                        break
+                    continue
+                if op == "IS NOT NULL":
+                    if left is None:
+                        group_matches = False
+                        break
+                    continue
+                if op == "IN":
+                    if not isinstance(raw_value, list) or left not in raw_value:
+                        group_matches = False
+                        break
+                    continue
+                if op == "NOT IN":
+                    if not isinstance(raw_value, list) or left in raw_value:
+                        group_matches = False
+                        break
+                    continue
+                if op == "LIKE":
+                    if left is None or not isinstance(raw_value, str):
+                        group_matches = False
+                        break
+                    pattern = "^" + re.escape(raw_value).replace(r"%", ".*").replace(r"_", ".") + "$"
+                    if re.match(pattern, str(left)) is None:
+                        group_matches = False
+                        break
+                    continue
+                if not self._compare(left, op, raw_value):
+                    group_matches = False
+                    break
+            if group_matches:
+                return True
+        return False
 
     def _select_pk_fast_path(self, schema: TableSchema, stmt: SelectStmt) -> List[Dict[str, Any]] | None:
         pk_col = schema.pk_column
