@@ -25,6 +25,7 @@ class Pager:
 
         self._fh = open(path, "r+b")
         self.header = self._read_header()
+        self._metadata_cache = self._load_metadata_from_header(self.header)
 
     def close(self) -> None:
         self._fh.flush()
@@ -90,10 +91,10 @@ class Pager:
         self._write_page_direct(page_id, data)
 
     def metadata(self) -> Dict[str, Any]:
-        return dict(self.header.get("metadata", {}))
+        return dict(self._metadata_cache)
 
     def set_metadata(self, metadata: Dict[str, Any]) -> None:
-        self.header["metadata"] = metadata
+        self._metadata_cache = dict(metadata)
         self._persist_header()
 
     def _init_file(self) -> None:
@@ -138,8 +139,73 @@ class Pager:
         return header
 
     def _persist_header(self) -> None:
-        page = self._encode_header_page(self.header)
+        header_for_disk = dict(self.header)
+        metadata_payload = json.dumps(self._metadata_cache, separators=(",", ":")).encode("utf-8")
+
+        # Fast path: keep metadata inline when it fits.
+        header_for_disk["metadata"] = self._metadata_cache
+        header_for_disk.pop("metadata_overflow_pages", None)
+        header_for_disk.pop("metadata_overflow_size", None)
+        try:
+            page = self._encode_header_page(header_for_disk)
+            self.header = header_for_disk
+            self.write_page(0, page)
+            return
+        except ValueError:
+            pass
+
+        # Spill metadata to overflow pages and store only pointers in header.
+        chunk_size = self.page_size - 4
+        needed_pages = max(1, (len(metadata_payload) + chunk_size - 1) // chunk_size)
+        existing_pages = [int(p) for p in self.header.get("metadata_overflow_pages", [])]
+        overflow_pages = list(existing_pages[:needed_pages])
+
+        while len(overflow_pages) < needed_pages:
+            overflow_pages.append(self._allocate_page_id_no_persist())
+
+        for i, page_id in enumerate(overflow_pages):
+            chunk = metadata_payload[i * chunk_size : (i + 1) * chunk_size]
+            out = bytearray(self.page_size)
+            out[:4] = struct.pack("<I", len(chunk))
+            out[4 : 4 + len(chunk)] = chunk
+            self.write_page(page_id, bytes(out))
+
+        header_for_disk["metadata"] = {}
+        header_for_disk["metadata_overflow_pages"] = overflow_pages
+        header_for_disk["metadata_overflow_size"] = len(metadata_payload)
+
+        page = self._encode_header_page(header_for_disk)
+        self.header = header_for_disk
         self.write_page(0, page)
+
+    def _allocate_page_id_no_persist(self) -> int:
+        page_id = int(self.header["next_page_id"])
+        self.header["next_page_id"] = page_id + 1
+        self.write_page(page_id, bytes(self.page_size))
+        return page_id
+
+    def _load_metadata_from_header(self, header: Dict[str, Any]) -> Dict[str, Any]:
+        inline = header.get("metadata", {})
+        overflow_pages = header.get("metadata_overflow_pages") or []
+        if not overflow_pages:
+            return dict(inline)
+
+        raw = bytearray()
+        for page_id in overflow_pages:
+            page = self.read_page(int(page_id))
+            (chunk_len,) = struct.unpack("<I", page[:4])
+            if chunk_len < 0 or chunk_len > self.page_size - 4:
+                raise ValueError("Corrupt metadata overflow page")
+            raw.extend(page[4 : 4 + chunk_len])
+
+        size = int(header.get("metadata_overflow_size", len(raw)))
+        payload = bytes(raw[:size])
+        if not payload:
+            return {}
+        loaded = json.loads(payload.decode("utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("Corrupt metadata payload")
+        return loaded
 
     def _encode_header_page(self, header: Dict[str, Any]) -> bytes:
         payload = json.dumps(header, separators=(",", ":")).encode("utf-8")
