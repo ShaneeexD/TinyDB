@@ -29,7 +29,7 @@ class WhereClause:
 class CreateTableStmt:
     table_name: str
     columns: Sequence[ColumnDef]
-    foreign_keys: Sequence[Tuple[str, str, str]]
+    foreign_keys: Sequence[Tuple[str, str, str, str]]
     primary_key_columns: Sequence[str] = ()
     check_exprs: Sequence[str] = ()
     if_not_exists: bool = False

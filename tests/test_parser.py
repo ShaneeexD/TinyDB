@@ -31,6 +31,28 @@ def test_parse_create_table_check_constraints():
     assert age_col.check_exprs == ["age >= 0"]
 
 
+def test_parse_create_table_foreign_key_on_delete_cascade():
+    stmt = parse(
+        "CREATE TABLE games ("
+        "id INTEGER PRIMARY KEY, "
+        "user_id INTEGER, "
+        "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+        ")"
+    )
+    assert list(stmt.foreign_keys) == [("user_id", "users", "id", "CASCADE")]
+
+
+def test_parse_create_table_foreign_key_on_delete_invalid_action():
+    with pytest.raises(ParseError, match="Unsupported ON DELETE action"):
+        parse(
+            "CREATE TABLE games ("
+            "id INTEGER PRIMARY KEY, "
+            "user_id INTEGER, "
+            "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET"
+            ")"
+        )
+
+
 def test_parse_select_group_by_having():
     stmt = parse("SELECT player, COUNT(*) AS total FROM games GROUP BY player HAVING total >= 2")
     assert stmt.group_by == ["player"]

@@ -255,7 +255,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
     stream.expect("(")
 
     columns: List[ColumnDef] = []
-    foreign_keys: List[Tuple[str, str, str]] = []
+    foreign_keys: List[Tuple[str, str, str, str]] = []
     check_exprs: List[str] = []
     primary_key_columns: List[str] = []
     while True:
@@ -269,7 +269,14 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
             stream.expect("(")
             ref_column = stream.pop()
             stream.expect(")")
-            foreign_keys.append((local_column, ref_table, ref_column))
+            on_delete = "RESTRICT"
+            if stream.consume("ON"):
+                stream.expect("DELETE")
+                action = stream.pop().upper()
+                if action not in {"CASCADE", "RESTRICT"}:
+                    raise ParseError(f"Unsupported ON DELETE action: {action}")
+                on_delete = action
+            foreign_keys.append((local_column, ref_table, ref_column, on_delete))
         elif stream.consume("PRIMARY"):
             stream.expect("KEY")
             stream.expect("(")

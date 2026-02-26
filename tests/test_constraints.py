@@ -214,6 +214,33 @@ def test_foreign_key_references_enforced_on_delete_parent(tmp_path):
         db.close()
 
 
+def test_foreign_key_on_delete_cascade(tmp_path):
+    db = TinyDB(str(tmp_path / "fk_cascade.db"))
+    try:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+        db.execute(
+            "CREATE TABLE games ("
+            "id INTEGER PRIMARY KEY, "
+            "user_id INTEGER, "
+            "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+            ")"
+        )
+
+        db.execute("INSERT INTO users VALUES (1, 'Alice')")
+        db.execute("INSERT INTO users VALUES (2, 'Bob')")
+        db.execute("INSERT INTO games VALUES (10, 1)")
+        db.execute("INSERT INTO games VALUES (11, 1)")
+        db.execute("INSERT INTO games VALUES (12, 2)")
+
+        affected = db.execute("DELETE FROM users WHERE id = 1")
+        assert affected == 1
+
+        rows = db.execute("SELECT id, user_id FROM games ORDER BY id ASC")
+        assert rows == [{"id": 12, "user_id": 2}]
+    finally:
+        db.close()
+
+
 def test_not_null_rejected(tmp_path):
     db = TinyDB(str(tmp_path / "notnull.db"))
     try:

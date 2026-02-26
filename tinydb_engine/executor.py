@@ -245,7 +245,7 @@ class Executor:
                 raise ValueError("AUTOINCREMENT requires INTEGER PRIMARY KEY")
 
         foreign_keys: List[dict[str, str]] = []
-        for local_column, ref_table, ref_column in stmt.foreign_keys:
+        for local_column, ref_table, ref_column, on_delete in stmt.foreign_keys:
             if not any(col.name.lower() == local_column.lower() for col in columns):
                 raise ValueError(f"Unknown column '{local_column}' in FOREIGN KEY")
 
@@ -260,6 +260,7 @@ class Executor:
                     "column": local_column,
                     "ref_table": ref_table,
                     "ref_column": ref_column,
+                    "on_delete": on_delete,
                 }
             )
 
@@ -1009,8 +1010,13 @@ class Executor:
                 ref_idx = schema.column_index(fk["ref_column"])
                 parent_value = row_values[ref_idx]
                 child_idx = child_schema.column_index(fk["column"])
+                on_delete = str(fk.get("on_delete", "RESTRICT")).upper()
                 for child_row in self._scan_rows(child_schema):
                     if child_row["values"][child_idx] == parent_value:
+                        if on_delete == "CASCADE":
+                            where = WhereClause(groups=[[(fk["column"], "=", parent_value)]])
+                            self._delete(DeleteStmt(table_name=child_schema.name, where=where))
+                            break
                         raise ValueError(
                             f"FOREIGN KEY constraint failed: row is referenced by "
                             f"{child_schema.name}.{fk['column']}"
@@ -1152,8 +1158,25 @@ class Executor:
         if func == "COUNT" and arg == "*":
             return len(rows)
 
+        distinct_match = re.match(r"^DISTINCT\s*(.+)$", arg, flags=re.IGNORECASE)
+        distinct_arg = False
+        if distinct_match is not None:
+            distinct_arg = True
+            arg = distinct_match.group(1).strip()
+            if not arg:
+                raise ValueError(f"Invalid aggregate DISTINCT expression: {expr}")
+
         col_idx = schema.column_index(arg)
         values = [row["values"][col_idx] for row in rows if row["values"][col_idx] is not None]
+        if distinct_arg:
+            seen: set[Any] = set()
+            deduped: List[Any] = []
+            for value in values:
+                if value in seen:
+                    continue
+                seen.add(value)
+                deduped.append(value)
+            values = deduped
         if func == "COUNT":
             return len(values)
         if not values:

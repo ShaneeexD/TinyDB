@@ -32,7 +32,10 @@ It stores data in a single file, uses fixed-size pages, maintains a primary-key 
   - `PRIMARY KEY` (single-column and table-level composite, e.g. `PRIMARY KEY (user_id, org_id)`)
   - `INTEGER PRIMARY KEY AUTOINCREMENT`
   - `NOT NULL`
-  - `FOREIGN KEY (col) REFERENCES other_table(other_col)`
+  - `UNIQUE` (including non-PK columns)
+  - `DEFAULT` values (applied when insert columns are omitted)
+  - `CHECK` (column-level and table-level)
+  - `FOREIGN KEY (col) REFERENCES other_table(other_col) [ON DELETE CASCADE|RESTRICT]`
   - Note: `ALTER TABLE ... ADD COLUMN` currently allows nullable, non-PK columns only.
   - Note: `ALTER TABLE ... REMOVE COLUMN` currently supports removing only the last non-PK column.
 - Primary key B-tree index (with PK equality lookup fast path)
@@ -180,6 +183,6 @@ run_gui.bat app.db
 - Transactions: implicit per statement, or explicit `BEGIN` / `COMMIT` / `ROLLBACK`.
 - Supported predicates: `AND`, `OR`, `IN`, `NOT IN`, `IN (SELECT ...)`, `NOT IN (SELECT ...)`, `LIKE`, `IS NULL`, `IS NOT NULL`.
 - Joins: chained `JOIN`, `INNER JOIN`, and `LEFT JOIN` (equality `ON`) with optional table aliases.
-- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`, `HAVING`).
+- Aggregates: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` (with `GROUP BY`, `HAVING`), including `COUNT(DISTINCT col)`.
 - Types: `INTEGER`, `TEXT`, `REAL`, `BOOLEAN`, `TIMESTAMP`, `BLOB`, `DECIMAL` (`NUMERIC` alias).
 - Binary-safe BLOB inserts are best done with parameter binding (`?`) so arbitrary bytes are preserved.

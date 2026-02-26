@@ -246,6 +246,21 @@ def test_group_by_and_aggregates(tmp_path):
         db.close()
 
 
+def test_count_distinct_aggregate(tmp_path):
+    db_path = tmp_path / "crud_count_distinct.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE bets (id INTEGER PRIMARY KEY, username TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (1, 'alice')") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (2, 'alice')") == "OK"
+        assert db.execute("INSERT INTO bets VALUES (3, 'bob')") == "OK"
+
+        rows = db.execute("SELECT COUNT(DISTINCT username) AS unique_users FROM bets")
+        assert rows == [{"unique_users": 2}]
+    finally:
+        db.close()
+
+
 def test_select_inner_join_basic(tmp_path):
     db_path = tmp_path / "crud_join_basic.db"
     db = TinyDB(str(db_path))
