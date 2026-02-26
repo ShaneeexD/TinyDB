@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -36,6 +38,53 @@ def test_basic_crud(tmp_path):
 
         rows = db.execute("SELECT * FROM users ORDER BY id ASC")
         assert rows == [{"id": 2, "name": "Bob", "score": 8.2, "active": False}]
+    finally:
+        db.close()
+
+
+def test_where_in_select_subquery_support(tmp_path):
+    db_path = tmp_path / "crud_where_in_subquery.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("CREATE TABLE memberships (user_id INTEGER PRIMARY KEY, org TEXT NOT NULL)") == "OK"
+
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Bob')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (3, 'Cara')") == "OK"
+        assert db.execute("INSERT INTO memberships VALUES (1, 'A')") == "OK"
+        assert db.execute("INSERT INTO memberships VALUES (3, 'B')") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE id IN (SELECT user_id FROM memberships) ORDER BY id ASC")
+        assert rows == [{"id": 1}, {"id": 3}]
+
+        rows = db.execute("SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM memberships) ORDER BY id ASC")
+        assert rows == [{"id": 2}]
+    finally:
+        db.close()
+
+
+def test_composite_primary_key_support(tmp_path):
+    db_path = tmp_path / "crud_composite_pk.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute(
+            "CREATE TABLE memberships ("
+            "user_id INTEGER, "
+            "org_id INTEGER, "
+            "role TEXT, "
+            "PRIMARY KEY (user_id, org_id)"
+            ")"
+        ) == "OK"
+
+        assert db.execute("INSERT INTO memberships VALUES (1, 10, 'member')") == "OK"
+        assert db.execute("INSERT INTO memberships VALUES (1, 11, 'admin')") == "OK"
+
+        rows = db.execute("SELECT role FROM memberships WHERE user_id = 1 AND org_id = 11")
+        assert rows == [{"role": "admin"}]
+
+        with pytest.raises(ValueError, match="Duplicate primary key"):
+            db.execute("INSERT INTO memberships VALUES (1, 10, 'owner')")
     finally:
         db.close()
 

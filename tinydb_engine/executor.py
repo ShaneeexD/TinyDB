@@ -120,7 +120,14 @@ class Executor:
         ]
 
     def _explain(self, stmt: ExplainStmt) -> List[Dict[str, Any]]:
-        return [{"plan": self._plan_label(stmt.statement)}]
+        metrics = self._estimate_plan_metrics(stmt.statement)
+        return [
+            {
+                "plan": self._plan_label(stmt.statement),
+                "estimated_rows": metrics["estimated_rows"],
+                "estimated_cost": metrics["estimated_cost"],
+            }
+        ]
 
     def _profile(self, stmt: ProfileStmt) -> List[Dict[str, Any]]:
         start = time.perf_counter()
@@ -214,9 +221,19 @@ class Executor:
             for col in stmt.columns
         ]
 
+        if stmt.primary_key_columns:
+            if any(col.primary_key for col in columns):
+                raise ValueError("Cannot mix column PRIMARY KEY with table PRIMARY KEY")
+            for pk_name in stmt.primary_key_columns:
+                pk_idx = next((i for i, col in enumerate(columns) if col.name.lower() == pk_name.lower()), None)
+                if pk_idx is None:
+                    raise ValueError(f"Unknown column '{pk_name}' in PRIMARY KEY")
+                columns[pk_idx].primary_key = True
+                columns[pk_idx].not_null = True
+
         pk_count = sum(1 for c in columns if c.primary_key)
-        if pk_count > 1:
-            raise ValueError("Only one PRIMARY KEY is supported")
+        if pk_count == 0:
+            raise ValueError("PRIMARY KEY is required")
         auto_inc_cols = [c for c in columns if c.auto_increment]
         if len(auto_inc_cols) > 1:
             raise ValueError("Only one AUTOINCREMENT column is supported")
@@ -401,17 +418,16 @@ class Executor:
 
     def _insert(self, stmt: InsertStmt) -> str:
         schema = self._schema(stmt.table_name)
-        pk_col = schema.pk_column
-        pk_idx = schema.column_index(pk_col.name) if pk_col is not None else None
-        btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_col is not None else None
+        pk_indices = self._pk_indices(schema)
+        btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_indices else None
         sec_btrees = self._secondary_btrees(schema)
 
         for raw_row in stmt.values:
             values = self._materialize_insert_values(schema, stmt.columns, list(raw_row))
             values = self._coerce_row(schema, values)
 
-            if pk_idx is not None and btree is not None:
-                pk_val = values[pk_idx]
+            if pk_indices and btree is not None:
+                pk_val = self._pk_value(values, pk_indices)
                 if pk_val is None:
                     raise ValueError("PRIMARY KEY cannot be NULL")
                 existing_loc = btree.find(pk_val)
@@ -437,19 +453,19 @@ class Executor:
             self._enforce_unique_constraints(schema, values)
 
             page_id, slot_id = self._insert_row(schema, values)
-            if pk_idx is not None and btree is not None:
-                btree.insert(values[pk_idx], (page_id, slot_id))
+            if pk_indices and btree is not None:
+                btree.insert(self._pk_value(values, pk_indices), (page_id, slot_id))
             for idx_meta, sec_btree in sec_btrees:
                 key = self._index_key_for_meta(schema, values, idx_meta)
                 if key is None:
                     continue
                 sec_btree.insert_non_unique(key, (page_id, slot_id))
 
-        if pk_idx is not None and btree is not None:
+        if pk_indices and btree is not None:
             schema.pk_index_root_page = btree.root_page_id
         for idx_meta, sec_btree in sec_btrees:
             idx_meta["root_page"] = sec_btree.root_page_id
-        if pk_idx is not None or sec_btrees:
+        if pk_indices or sec_btrees:
             self.catalog.save(self.schemas)
         return "OK"
 
@@ -662,8 +678,18 @@ class Executor:
                         group_matches = False
                         break
                     continue
+                if op == "IN_SUBQUERY":
+                    if not isinstance(raw_value, str) or left not in self._execute_subquery_values(raw_value):
+                        group_matches = False
+                        break
+                    continue
                 if op == "NOT IN":
                     if not isinstance(raw_value, list) or left in raw_value:
+                        group_matches = False
+                        break
+                    continue
+                if op == "NOT IN_SUBQUERY":
+                    if not isinstance(raw_value, str) or left in self._execute_subquery_values(raw_value):
                         group_matches = False
                         break
                     continue
@@ -773,9 +799,8 @@ class Executor:
         assignment_indices = [(schema.column_index(name), value) for name, value in stmt.assignments]
         affected = 0
 
-        pk_col = schema.pk_column
-        pk_idx = schema.column_index(pk_col.name) if pk_col else None
-        btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_col else None
+        pk_indices = self._pk_indices(schema)
+        btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_indices else None
         sec_btrees = self._secondary_btrees(schema)
 
         for row in rows:
@@ -783,13 +808,13 @@ class Executor:
                 continue
 
             new_values = list(row["values"])
-            old_pk = new_values[pk_idx] if pk_idx is not None else None
+            old_pk = self._pk_value(new_values, pk_indices) if pk_indices else None
             for col_idx, raw_value in assignment_indices:
                 new_values[col_idx] = raw_value
             new_values = self._coerce_row(schema, new_values)
 
-            if pk_idx is not None:
-                new_pk = new_values[pk_idx]
+            if pk_indices:
+                new_pk = self._pk_value(new_values, pk_indices)
                 if new_pk is None:
                     raise ValueError("PRIMARY KEY cannot be NULL")
                 if new_pk != old_pk and btree and btree.find(new_pk) is not None:
@@ -805,9 +830,9 @@ class Executor:
             self.pager.write_page(row["page_id"], self._write_table_page(page_obj))
 
             new_page, new_slot = self._insert_row(schema, new_values)
-            if pk_idx is not None and btree:
+            if pk_indices and btree:
                 btree.delete(old_pk)
-                btree.insert(new_values[pk_idx], (new_page, new_slot))
+                btree.insert(new_pk, (new_page, new_slot))
                 schema.pk_index_root_page = btree.root_page_id
             for idx_meta, sec_btree in sec_btrees:
                 old_key = self._index_key_for_meta(schema, row["values"], idx_meta)
@@ -821,7 +846,7 @@ class Executor:
         if affected:
             for idx_meta, sec_btree in sec_btrees:
                 idx_meta["root_page"] = sec_btree.root_page_id
-        if affected and (pk_idx is not None or sec_btrees):
+        if affected and (pk_indices or sec_btrees):
             self.catalog.save(self.schemas)
         return affected
 
@@ -995,9 +1020,8 @@ class Executor:
         schema = self._schema(stmt.table_name)
         rows = self._scan_rows(schema)
         affected = 0
-        pk_col = schema.pk_column
-        pk_idx = schema.column_index(pk_col.name) if pk_col else None
-        btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_col else None
+        pk_indices = self._pk_indices(schema)
+        btree = BTreeIndex(self.pager, schema.pk_index_root_page) if pk_indices else None
         sec_btrees = self._secondary_btrees(schema)
 
         for row in rows:
@@ -1008,8 +1032,10 @@ class Executor:
             page_obj = self._read_table_page(page)
             page_obj["slots"][row["slot_id"]]["deleted"] = True
             self.pager.write_page(row["page_id"], self._write_table_page(page_obj))
-            if pk_idx is not None and btree:
-                btree.delete(row["values"][pk_idx])
+            if pk_indices and btree:
+                old_pk = self._pk_value(row["values"], pk_indices)
+                if old_pk is not None:
+                    btree.delete(old_pk)
                 schema.pk_index_root_page = btree.root_page_id
             for idx_meta, sec_btree in sec_btrees:
                 old_key = self._index_key_for_meta(schema, row["values"], idx_meta)
@@ -1020,9 +1046,51 @@ class Executor:
         if affected:
             for idx_meta, sec_btree in sec_btrees:
                 idx_meta["root_page"] = sec_btree.root_page_id
-        if affected and (pk_idx is not None or sec_btrees):
+        if affected and (pk_indices or sec_btrees):
             self.catalog.save(self.schemas)
         return affected
+
+    def _pk_indices(self, schema: TableSchema) -> List[int]:
+        return [idx for idx, col in enumerate(schema.columns) if col.primary_key]
+
+    def _pk_value(self, values: Sequence[Any], pk_indices: Sequence[int]) -> Any:
+        key_parts = [values[idx] for idx in pk_indices]
+        if any(part is None for part in key_parts):
+            return None
+        if len(key_parts) == 1:
+            return key_parts[0]
+        return tuple(key_parts)
+
+    def _execute_subquery_values(self, subquery_sql: str) -> List[Any]:
+        from tinydb_engine.parser import parse
+
+        result = self.execute(parse(subquery_sql))
+        if not isinstance(result, list):
+            raise ValueError("Subquery in IN must return rows")
+        out: List[Any] = []
+        for row in result:
+            if not isinstance(row, dict):
+                raise ValueError("Subquery in IN must be a SELECT")
+            if len(row) != 1:
+                raise ValueError("Subquery in IN must return exactly one column")
+            out.append(next(iter(row.values())))
+        return out
+
+    def _estimate_plan_metrics(self, inner: Statement) -> Dict[str, float | int]:
+        if not isinstance(inner, SelectStmt):
+            return {"estimated_rows": 1, "estimated_cost": 1}
+
+        schema = self._schema(inner.table_name)
+        total_rows = len(self._scan_rows(schema))
+        if inner.join_table is not None:
+            return {"estimated_rows": max(1, total_rows), "estimated_cost": max(5, total_rows * 2)}
+        if self._select_pk_fast_path(schema, inner) is not None:
+            return {"estimated_rows": 1, "estimated_cost": 1}
+        if self._select_secondary_index_fast_path(schema, inner) is not None:
+            return {"estimated_rows": max(1, total_rows // 4), "estimated_cost": max(2, total_rows // 4)}
+        if inner.order_by and self._can_use_index_for_order(schema, inner.order_by[0]):
+            return {"estimated_rows": max(1, total_rows), "estimated_cost": max(2, total_rows)}
+        return {"estimated_rows": max(1, total_rows), "estimated_cost": max(3, total_rows * 2)}
 
     def _secondary_btrees(self, schema: TableSchema) -> List[Tuple[dict[str, Any], BTreeIndex]]:
         out: List[Tuple[dict[str, Any], BTreeIndex]] = []
@@ -1313,10 +1381,30 @@ class Executor:
                         break
                     continue
 
+                if op == "IN_SUBQUERY":
+                    if not isinstance(raw_value, str):
+                        raise ValueError("IN subquery predicate requires subquery SQL")
+                    subquery_values = self._execute_subquery_values(raw_value)
+                    right_values = [coerce_value(item, col.data_type) if item is not None else None for item in subquery_values]
+                    if left not in right_values:
+                        group_matches = False
+                        break
+                    continue
+
                 if op == "NOT IN":
                     if not isinstance(raw_value, list):
                         raise ValueError("NOT IN predicate requires a list of values")
                     right_values = [coerce_value(item, col.data_type) if item is not None else None for item in raw_value]
+                    if left in right_values:
+                        group_matches = False
+                        break
+                    continue
+
+                if op == "NOT IN_SUBQUERY":
+                    if not isinstance(raw_value, str):
+                        raise ValueError("NOT IN subquery predicate requires subquery SQL")
+                    subquery_values = self._execute_subquery_values(raw_value)
+                    right_values = [coerce_value(item, col.data_type) if item is not None else None for item in subquery_values]
                     if left in right_values:
                         group_matches = False
                         break
@@ -1495,8 +1583,18 @@ class Executor:
                         group_matches = False
                         break
                     continue
+                if op == "IN_SUBQUERY":
+                    if not isinstance(raw_value, str) or left not in self._execute_subquery_values(raw_value):
+                        group_matches = False
+                        break
+                    continue
                 if op == "NOT IN":
                     if not isinstance(raw_value, list) or left in raw_value:
+                        group_matches = False
+                        break
+                    continue
+                if op == "NOT IN_SUBQUERY":
+                    if not isinstance(raw_value, str) or left in self._execute_subquery_values(raw_value):
                         group_matches = False
                         break
                     continue

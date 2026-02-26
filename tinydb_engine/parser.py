@@ -214,6 +214,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
     columns: List[ColumnDef] = []
     foreign_keys: List[Tuple[str, str, str]] = []
     check_exprs: List[str] = []
+    primary_key_columns: List[str] = []
     while True:
         if stream.consume("FOREIGN"):
             stream.expect("KEY")
@@ -226,6 +227,14 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
             ref_column = stream.pop()
             stream.expect(")")
             foreign_keys.append((local_column, ref_table, ref_column))
+        elif stream.consume("PRIMARY"):
+            stream.expect("KEY")
+            stream.expect("(")
+            names = [stream.pop()]
+            while stream.consume(","):
+                names.append(stream.pop())
+            stream.expect(")")
+            primary_key_columns.extend(names)
         elif stream.consume("CHECK"):
             check_exprs.append(_parse_check_expression(stream))
         else:
@@ -287,6 +296,7 @@ def _parse_create(stream: TokenStream) -> CreateTableStmt | CreateIndexStmt:
         table_name=table_name,
         columns=columns,
         foreign_keys=foreign_keys,
+        primary_key_columns=primary_key_columns,
         check_exprs=check_exprs,
         if_not_exists=if_not_exists,
     )
@@ -565,25 +575,49 @@ def _parse_predicate_groups(stream: TokenStream) -> WhereClause:
                 current_group.append((col, "IS NULL", None))
         elif op == "IN":
             stream.expect("(")
-            values: List[Any] = []
-            while True:
-                values.append(_parse_literal(stream.pop()))
-                if stream.consume(","):
-                    continue
-                stream.expect(")")
-                break
-            current_group.append((col, "IN", values))
+            if stream.peek() is not None and stream.peek().upper() == "SELECT":
+                start = stream.pos
+                depth = 1
+                while depth > 0:
+                    token = stream.pop()
+                    if token == "(":
+                        depth += 1
+                    elif token == ")":
+                        depth -= 1
+                subquery_sql = " ".join(stream.tokens[start : stream.pos - 1])
+                current_group.append((col, "IN_SUBQUERY", subquery_sql))
+            else:
+                values: List[Any] = []
+                while True:
+                    values.append(_parse_literal(stream.pop()))
+                    if stream.consume(","):
+                        continue
+                    stream.expect(")")
+                    break
+                current_group.append((col, "IN", values))
         elif op == "NOT":
             stream.expect("IN")
             stream.expect("(")
-            values = []
-            while True:
-                values.append(_parse_literal(stream.pop()))
-                if stream.consume(","):
-                    continue
-                stream.expect(")")
-                break
-            current_group.append((col, "NOT IN", values))
+            if stream.peek() is not None and stream.peek().upper() == "SELECT":
+                start = stream.pos
+                depth = 1
+                while depth > 0:
+                    token = stream.pop()
+                    if token == "(":
+                        depth += 1
+                    elif token == ")":
+                        depth -= 1
+                subquery_sql = " ".join(stream.tokens[start : stream.pos - 1])
+                current_group.append((col, "NOT IN_SUBQUERY", subquery_sql))
+            else:
+                values = []
+                while True:
+                    values.append(_parse_literal(stream.pop()))
+                    if stream.consume(","):
+                        continue
+                    stream.expect(")")
+                    break
+                current_group.append((col, "NOT IN", values))
         elif op == "LIKE":
             value = _parse_literal(stream.pop())
             current_group.append((col, "LIKE", value))

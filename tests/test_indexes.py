@@ -39,7 +39,9 @@ def test_create_composite_index_lookup_and_mutations(tmp_path):
         assert rows == [{"id": 2}]
 
         plan = db.execute("EXPLAIN SELECT id FROM users WHERE name = 'Alice' AND region = 'EU'")
-        assert plan == [{"plan": "SECONDARY INDEX LOOKUP"}]
+        assert plan[0]["plan"] == "SECONDARY INDEX LOOKUP"
+        assert "estimated_rows" in plan[0]
+        assert "estimated_cost" in plan[0]
 
         rows = db.execute("SHOW INDEXES users")
         assert {"index_name": "idx_users_name_region", "table_name": "users", "column_name": "name, region"} in rows
@@ -100,7 +102,9 @@ def test_show_drop_index_and_explain(tmp_path):
         assert rows == [{"index_name": "idx_users_email", "table_name": "users", "column_name": "email"}]
 
         plan = db.execute("EXPLAIN SELECT id FROM users WHERE email = 'a@example.com'")
-        assert plan == [{"plan": "SECONDARY INDEX LOOKUP"}]
+        assert plan[0]["plan"] == "SECONDARY INDEX LOOKUP"
+        assert "estimated_rows" in plan[0]
+        assert "estimated_cost" in plan[0]
 
         assert db.execute("DROP INDEX idx_users_email") == "OK"
         rows = db.execute("SHOW INDEXES users")

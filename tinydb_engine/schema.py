@@ -33,10 +33,14 @@ class TableSchema:
 
     @property
     def pk_column(self) -> Optional[ColumnSchema]:
-        for column in self.columns:
-            if column.primary_key:
-                return column
+        pk_cols = [column for column in self.columns if column.primary_key]
+        if len(pk_cols) == 1:
+            return pk_cols[0]
         return None
+
+    @property
+    def pk_columns(self) -> List[ColumnSchema]:
+        return [column for column in self.columns if column.primary_key]
 
     def column_index(self, name: str) -> int:
         for idx, column in enumerate(self.columns):

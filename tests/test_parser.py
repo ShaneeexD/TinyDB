@@ -65,6 +65,23 @@ def test_parse_create_table_check_expression_with_logic_and_arithmetic():
     assert "AND games >= 0" in expr
 
 
+def test_parse_create_table_composite_primary_key():
+    stmt = parse("CREATE TABLE memberships (user_id INTEGER, org_id INTEGER, role TEXT, PRIMARY KEY (user_id, org_id))")
+    assert list(stmt.primary_key_columns) == ["user_id", "org_id"]
+
+
+def test_parse_where_in_select_subquery():
+    stmt = parse("SELECT id FROM users WHERE id IN (SELECT user_id FROM memberships)")
+    assert stmt.where is not None
+    assert stmt.where.groups == [[("id", "IN_SUBQUERY", "SELECT user_id FROM memberships")]]
+
+
+def test_parse_where_not_in_select_subquery():
+    stmt = parse("SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM memberships)")
+    assert stmt.where is not None
+    assert stmt.where.groups == [[("id", "NOT IN_SUBQUERY", "SELECT user_id FROM memberships")]]
+
+
 def test_parse_error_includes_line_and_column():
     with pytest.raises(ParseError) as exc_info:
         parse("SELECT id\nFROM users\nWHERE name = @bad")
