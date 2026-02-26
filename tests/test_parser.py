@@ -51,6 +51,20 @@ def test_parse_create_index_multiple_columns():
     assert list(stmt.column_names) == ["name", "region"]
 
 
+def test_parse_create_table_check_expression_with_logic_and_arithmetic():
+    stmt = parse(
+        "CREATE TABLE users ("
+        "id INTEGER PRIMARY KEY, "
+        "wins INTEGER, losses INTEGER, games INTEGER, "
+        "CHECK ((wins + losses = games) AND games >= 0)"
+        ")"
+    )
+    assert len(stmt.check_exprs) == 1
+    expr = str(stmt.check_exprs[0])
+    assert "wins + losses = games" in expr
+    assert "AND games >= 0" in expr
+
+
 def test_parse_error_includes_line_and_column():
     with pytest.raises(ParseError) as exc_info:
         parse("SELECT id\nFROM users\nWHERE name = @bad")

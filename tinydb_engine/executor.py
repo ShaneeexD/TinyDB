@@ -853,28 +853,110 @@ class Executor:
                     raise ValueError(f"CHECK constraint failed: {col.name}: {expr}")
 
     def _evaluate_check_expr(self, schema: TableSchema, row_map: Dict[str, Any], expr: str) -> bool:
-        match = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|!=|=|<|>)\s*(.+?)\s*", expr)
-        if match is None:
+        tokens = self._tokenize_check_expr(expr)
+        value, pos = self._parse_check_or(schema, row_map, tokens, 0)
+        if pos != len(tokens):
             raise ValueError(f"Unsupported CHECK expression: {expr}")
+        return bool(value)
 
-        left_name, op, right_token = match.groups()
-        left_col = next((c for c in schema.columns if c.name.lower() == left_name.lower()), None)
-        if left_col is None:
-            raise ValueError(f"Unknown CHECK column: {left_name}")
-        left = row_map.get(left_col.name)
+    def _tokenize_check_expr(self, expr: str) -> List[str]:
+        token_re = re.compile(
+            r"\s*(<=|>=|!=|=|<|>|\(|\)|\+|-|\*|/|\bAND\b|\bOR\b|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|-?\d+\.\d+|-?\d+|[A-Za-z_][A-Za-z0-9_]*)",
+            re.IGNORECASE,
+        )
+        tokens: List[str] = []
+        pos = 0
+        while pos < len(expr):
+            if expr[pos].isspace():
+                pos += 1
+                continue
+            m = token_re.match(expr, pos)
+            if m is None:
+                snippet = expr[pos : pos + 24]
+                raise ValueError(f"Unsupported CHECK expression near: {snippet!r}")
+            tokens.append(m.group(1))
+            pos = m.end()
+        return tokens
 
-        right: Any
-        right_col = next((c for c in schema.columns if c.name.lower() == right_token.lower()), None)
-        if right_col is not None:
-            right = row_map.get(right_col.name)
-        else:
-            right = self._parse_check_literal(right_token)
-            if right is not None:
-                right = coerce_value(right, left_col.data_type)
+    def _parse_check_or(self, schema: TableSchema, row_map: Dict[str, Any], tokens: List[str], pos: int) -> Tuple[bool, int]:
+        left, pos = self._parse_check_and(schema, row_map, tokens, pos)
+        while pos < len(tokens) and tokens[pos].upper() == "OR":
+            right, pos = self._parse_check_and(schema, row_map, tokens, pos + 1)
+            left = bool(left) or bool(right)
+        return bool(left), pos
 
-        return self._compare(left, op, right)
+    def _parse_check_and(self, schema: TableSchema, row_map: Dict[str, Any], tokens: List[str], pos: int) -> Tuple[bool, int]:
+        left, pos = self._parse_check_comparison(schema, row_map, tokens, pos)
+        while pos < len(tokens) and tokens[pos].upper() == "AND":
+            right, pos = self._parse_check_comparison(schema, row_map, tokens, pos + 1)
+            left = bool(left) and bool(right)
+        return bool(left), pos
 
-    def _parse_check_literal(self, token: str) -> Any:
+    def _parse_check_comparison(self, schema: TableSchema, row_map: Dict[str, Any], tokens: List[str], pos: int) -> Tuple[bool, int]:
+        if pos < len(tokens) and tokens[pos] == "(":
+            nested, next_pos = self._parse_check_or(schema, row_map, tokens, pos + 1)
+            if next_pos >= len(tokens) or tokens[next_pos] != ")":
+                raise ValueError("Unclosed CHECK expression parenthesis")
+            return bool(nested), next_pos + 1
+
+        left, pos = self._parse_check_arith(schema, row_map, tokens, pos)
+        if pos >= len(tokens):
+            return bool(left), pos
+        if tokens[pos].upper() == "IS":
+            if pos + 1 < len(tokens) and tokens[pos + 1].upper() == "NULL":
+                return left is None, pos + 2
+            if pos + 2 < len(tokens) and tokens[pos + 1].upper() == "NOT" and tokens[pos + 2].upper() == "NULL":
+                return left is not None, pos + 3
+            raise ValueError("Unsupported CHECK IS expression")
+        op = tokens[pos]
+        if op not in {"=", "!=", "<", "<=", ">", ">="}:
+            return bool(left), pos
+        right, pos = self._parse_check_arith(schema, row_map, tokens, pos + 1)
+        return self._compare(left, op, right), pos
+
+    def _parse_check_arith(self, schema: TableSchema, row_map: Dict[str, Any], tokens: List[str], pos: int) -> Tuple[Any, int]:
+        left, pos = self._parse_check_term(schema, row_map, tokens, pos)
+        while pos < len(tokens) and tokens[pos] in {"+", "-"}:
+            op = tokens[pos]
+            right, pos = self._parse_check_term(schema, row_map, tokens, pos + 1)
+            if left is None or right is None:
+                left = None
+            elif op == "+":
+                left = left + right
+            else:
+                left = left - right
+        return left, pos
+
+    def _parse_check_term(self, schema: TableSchema, row_map: Dict[str, Any], tokens: List[str], pos: int) -> Tuple[Any, int]:
+        left, pos = self._parse_check_factor(schema, row_map, tokens, pos)
+        while pos < len(tokens) and tokens[pos] in {"*", "/"}:
+            op = tokens[pos]
+            right, pos = self._parse_check_factor(schema, row_map, tokens, pos + 1)
+            if left is None or right is None:
+                left = None
+            elif op == "*":
+                left = left * right
+            else:
+                left = left / right
+        return left, pos
+
+    def _parse_check_factor(self, schema: TableSchema, row_map: Dict[str, Any], tokens: List[str], pos: int) -> Tuple[Any, int]:
+        if pos >= len(tokens):
+            raise ValueError("Invalid CHECK expression")
+        token = tokens[pos]
+        if token == "(":
+            value, next_pos = self._parse_check_arith(schema, row_map, tokens, pos + 1)
+            if next_pos >= len(tokens) or tokens[next_pos] != ")":
+                raise ValueError("Unclosed CHECK arithmetic parenthesis")
+            return value, next_pos + 1
+        if token == "-":
+            value, next_pos = self._parse_check_factor(schema, row_map, tokens, pos + 1)
+            if value is None:
+                return None, next_pos
+            return -value, next_pos
+        return self._parse_check_value(schema, row_map, token), pos + 1
+
+    def _parse_check_value(self, schema: TableSchema, row_map: Dict[str, Any], token: str) -> Any:
         upper = token.upper()
         if upper == "NULL":
             return None
@@ -882,11 +964,14 @@ class Executor:
             return True
         if upper == "FALSE":
             return False
+        col = next((c for c in schema.columns if c.name.lower() == token.lower()), None)
+        if col is not None:
+            return row_map.get(col.name)
         if token.startswith("'") and token.endswith("'"):
             return token[1:-1].replace("''", "'")
-        if re.fullmatch(r"\d+\.\d+", token):
+        if re.fullmatch(r"-?\d+\.\d+", token):
             return float(token)
-        if re.fullmatch(r"\d+", token):
+        if re.fullmatch(r"-?\d+", token):
             return int(token)
         return token
 
