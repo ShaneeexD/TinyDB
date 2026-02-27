@@ -168,6 +168,11 @@ class DescribeTableStmt:
     table_name: str
 
 
+@dataclass(frozen=True)
+class ReindexStmt:
+    table_name: str
+
+
 Statement = (
     CreateTableStmt
     | InsertStmt
@@ -190,4 +195,5 @@ Statement = (
     | RollbackStmt
     | ShowTablesStmt
     | DescribeTableStmt
+    | ReindexStmt
 )

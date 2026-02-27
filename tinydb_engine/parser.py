@@ -22,6 +22,7 @@ from .ast_nodes import (
     JoinClause,
     ProfileStmt,
     RollbackStmt,
+    ReindexStmt,
     SelectStmt,
     ShowIndexesStmt,
     ShowStatsStmt,
@@ -32,7 +33,7 @@ from .ast_nodes import (
 )
 
 _TOKEN_RE = re.compile(
-    r"\s*(=>|<=|>=|!=|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bINNER\b|\bLEFT\b|\bON\b|\bINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bHAVING\b|\bDISTINCT\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bREPLACE\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bCHECK\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|-?\d+\.\d+|-?\d+|[(),=*<>.+/\-]|[A-Za-z_][A-Za-z0-9_]*)",
+    r"\s*(=>|<=|>=|!=|\bAND\b|\bOR\b|\bIN\b|\bIS\b|\bLIKE\b|\bJOIN\b|\bINNER\b|\bLEFT\b|\bON\b|\bINDEX\b|\bREINDEX\b|\bASC\b|\bDESC\b|\bLIMIT\b|\bORDER\b|\bGROUP\b|\bBY\b|\bHAVING\b|\bDISTINCT\b|\bWHERE\b|\bFROM\b|\bVALUES\b|\bINTO\b|\bTABLE\b|\bCREATE\b|\bINSERT\b|\bREPLACE\b|\bSELECT\b|\bUPDATE\b|\bDELETE\b|\bDROP\b|\bSET\b|\bALTER\b|\bRENAME\b|\bADD\b|\bREMOVE\b|\bCOLUMN\b|\bTO\b|\bAS\b|\bPRIMARY\b|\bKEY\b|\bNOT\b|\bNULL\b|\bUNIQUE\b|\bDEFAULT\b|\bCHECK\b|\bFOREIGN\b|\bREFERENCES\b|\bBEGIN\b|\bCOMMIT\b|\bROLLBACK\b|\bSHOW\b|\bDESCRIBE\b|\bEXPLAIN\b|\bPROFILE\b|\bSTATS\b|\bIF\b|\bEXISTS\b|\bAUTO\b|\bINCREMENT\b|\bAUTOINCREMENT\b|\*|\bTRUE\b|\bFALSE\b|\bNULL\b|'(?:''|[^'])*'|-?\d+\.\d+|-?\d+|[(),=*<>.+/\-]|[A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
@@ -252,6 +253,11 @@ def parse(sql: str) -> Statement:
         table_name = stream.pop()
         _assert_consumed(stream)
         return DescribeTableStmt(table_name=table_name)
+    if keyword == "REINDEX":
+        stream.pop()
+        table_name = stream.pop()
+        _assert_consumed(stream)
+        return ReindexStmt(table_name=table_name)
     raise ParseError(f"Unsupported command: {keyword}")
 
 
@@ -724,6 +730,11 @@ def _parse_predicate_groups(stream: TokenStream) -> WhereClause:
         elif op == "LIKE":
             value = _parse_literal(stream.pop())
             current_group.append((col, "LIKE", value))
+        elif op == "BETWEEN":
+            lower = _parse_literal(stream.pop())
+            stream.expect("AND")
+            upper = _parse_literal(stream.pop())
+            current_group.append((col, "BETWEEN", (lower, upper)))
         else:
             if op not in {"=", "!=", "<", "<=", ">", ">="}:
                 raise ParseError(f"Unsupported operator: {op}")

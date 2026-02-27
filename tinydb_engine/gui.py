@@ -28,6 +28,7 @@ SQL_KEYWORDS = {
     "AUTO",
     "AUTOINCREMENT",
     "BEGIN",
+    "BETWEEN",
     "BY",
     "CASE",
     "COLUMN",
@@ -75,6 +76,7 @@ SQL_KEYWORDS = {
     "PROFILE",
     "PRIMARY",
     "REFERENCES",
+    "REINDEX",
     "REPLACE",
     "REMOVE",
     "RENAME",
@@ -129,6 +131,7 @@ Use only syntax supported by tinydb_engine:
 - SHOW INDEXES [table_name]
 - SHOW STATS
 - DESCRIBE table_name
+- REINDEX table_name
 - EXPLAIN SELECT ...
 - PROFILE SELECT ...
 - BEGIN / COMMIT / ROLLBACK
@@ -137,7 +140,7 @@ Important limitations:
 - Available SQL column types: INTEGER, TEXT, REAL, BOOLEAN, TIMESTAMP, BLOB, DECIMAL (NUMERIC alias).
 - AUTOINCREMENT is supported only on INTEGER PRIMARY KEY columns.
 - TIMESTAMP values should be string literals (example: '2023-04-01 12:34:56').
-- WHERE/HAVING supports AND/OR predicates, IN (...), NOT IN (...), LIKE, IS NULL, IS NOT NULL,
+- WHERE/HAVING supports AND/OR predicates, IN (...), NOT IN (...), LIKE, BETWEEN, IS NULL, IS NOT NULL,
   scalar subquery comparisons like `col = (SELECT ...)`, and IN/NOT IN subqueries.
 - JOIN support is currently one INNER JOIN per SELECT.
 - Aggregates: COUNT, SUM, AVG, MIN, MAX; includes COUNT(DISTINCT col).

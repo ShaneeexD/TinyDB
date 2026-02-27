@@ -146,3 +146,14 @@ def test_parse_error_includes_line_and_column():
     assert "line" in message
     assert "col" in message
     assert "near" in message
+
+
+def test_parse_reindex_table():
+    stmt = parse("REINDEX users")
+    assert stmt.table_name == "users"
+
+
+def test_parse_where_between_predicate():
+    stmt = parse("SELECT id FROM users WHERE id BETWEEN 1 AND 3")
+    assert stmt.where is not None
+    assert stmt.where.groups == [[("id", "BETWEEN", (1, 3))]]

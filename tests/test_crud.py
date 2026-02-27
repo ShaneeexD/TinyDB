@@ -42,6 +42,47 @@ def test_basic_crud(tmp_path):
         db.close()
 
 
+def test_where_between_predicate_support(tmp_path):
+    db_path = tmp_path / "crud_between.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'A')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'B')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (3, 'C')") == "OK"
+        assert db.execute("INSERT INTO users VALUES (4, 'D')") == "OK"
+
+        rows = db.execute("SELECT id FROM users WHERE id BETWEEN 2 AND 3 ORDER BY id ASC")
+        assert rows == [{"id": 2}, {"id": 3}]
+    finally:
+        db.close()
+
+
+def test_reindex_repairs_corrupt_primary_index(tmp_path):
+    db_path = tmp_path / "crud_reindex_repair.db"
+    db = TinyDB(str(db_path))
+    try:
+        assert db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)") == "OK"
+        assert db.execute("INSERT INTO users VALUES (1, 'Alice')") == "OK"
+
+        schema = db.executor.schemas["users"]
+        root_page = int(schema.pk_index_root_page)
+        page = bytearray(db.pager.read_page(root_page))
+        page[4:16] = b'{"bad":"oops'
+        db.pager.write_page(root_page, bytes(page))
+
+        with pytest.raises(ValueError, match="Corrupt B-tree node"):
+            db.execute("INSERT INTO users VALUES (2, 'Bob')")
+
+        assert db.execute("REINDEX users") == "OK"
+        assert db.execute("INSERT INTO users VALUES (2, 'Bob')") == "OK"
+
+        rows = db.execute("SELECT id, name FROM users ORDER BY id ASC")
+        assert rows == [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+    finally:
+        db.close()
+
+
 def test_where_in_select_subquery_support(tmp_path):
     db_path = tmp_path / "crud_where_in_subquery.db"
     db = TinyDB(str(db_path))

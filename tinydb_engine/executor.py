@@ -20,6 +20,7 @@ from tinydb_engine.ast_nodes import (
     ExplainStmt,
     InsertStmt,
     ProfileStmt,
+    ReindexStmt,
     RollbackStmt,
     SelectStmt,
     ShowIndexesStmt,
@@ -54,6 +55,8 @@ class Executor:
             return self._show_stats()
         if isinstance(statement, DescribeTableStmt):
             return self._describe_table(statement)
+        if isinstance(statement, ReindexStmt):
+            return self._reindex_table(statement)
         if isinstance(statement, ExplainStmt):
             return self._explain(statement)
         if isinstance(statement, ProfileStmt):
@@ -195,6 +198,48 @@ class Executor:
                 }
             )
         return out
+
+    def _reindex_table(self, stmt: ReindexStmt) -> str:
+        schema = self._schema(stmt.table_name)
+        rows = self._scan_rows(schema)
+
+        pk_indices = self._pk_indices(schema)
+        pk_btree = BTreeIndex.create(self.pager) if pk_indices else None
+
+        rebuilt_secondary: List[dict[str, Any]] = []
+        secondary_builders: List[Tuple[dict[str, Any], List[int], BTreeIndex]] = []
+        for idx_meta in schema.secondary_indexes or []:
+            col_names = self._index_columns(idx_meta)
+            col_indices = [schema.column_index(col) for col in col_names]
+            sec_btree = BTreeIndex.create(self.pager)
+            new_meta = dict(idx_meta)
+            new_meta["root_page"] = sec_btree.root_page_id
+            rebuilt_secondary.append(new_meta)
+            secondary_builders.append((new_meta, col_indices, sec_btree))
+
+        for row in rows:
+            values = row["values"]
+            location = (row["page_id"], row["slot_id"])
+
+            if pk_btree is not None:
+                pk_value = self._pk_value(values, pk_indices)
+                if pk_value is None:
+                    raise ValueError("PRIMARY KEY cannot be NULL")
+                if pk_btree.find(pk_value) is not None:
+                    raise ValueError("Duplicate primary key")
+                pk_btree.insert(pk_value, location)
+
+            for _meta, col_indices, sec_btree in secondary_builders:
+                key = self._index_key(values, col_indices)
+                if key is None:
+                    continue
+                sec_btree.insert_non_unique(key, location)
+
+        if pk_btree is not None:
+            schema.pk_index_root_page = pk_btree.root_page_id
+        schema.secondary_indexes = rebuilt_secondary
+        self.catalog.save(self.schemas)
+        return "OK"
 
     def _create_table(self, stmt: CreateTableStmt) -> str:
         key = stmt.table_name.lower()
@@ -728,6 +773,15 @@ class Executor:
                         group_matches = False
                         break
                     continue
+                if op == "BETWEEN":
+                    if left is None or not isinstance(raw_value, tuple) or len(raw_value) != 2:
+                        group_matches = False
+                        break
+                    lower, upper = raw_value
+                    if lower is None or upper is None or left < lower or left > upper:
+                        group_matches = False
+                        break
+                    continue
                 if not self._compare(left, op, raw_value):
                     group_matches = False
                     break
@@ -765,6 +819,16 @@ class Executor:
                     scalar = self._execute_scalar_subquery_value(raw_value, outer_context=outer_context)
                     compare_op = op[: -len("_SUBQUERY")]
                     if not self._compare(left, compare_op, scalar):
+                        group_matches = False
+                        break
+                    continue
+
+                if op == "BETWEEN":
+                    if left is None or not isinstance(raw_value, tuple) or len(raw_value) != 2:
+                        group_matches = False
+                        break
+                    lower, upper = raw_value
+                    if lower is None or upper is None or left < lower or left > upper:
                         group_matches = False
                         break
                     continue
@@ -1623,6 +1687,17 @@ class Executor:
                         break
                     continue
 
+                if op == "BETWEEN":
+                    if not isinstance(raw_value, tuple) or len(raw_value) != 2:
+                        raise ValueError("BETWEEN predicate requires lower and upper bounds")
+                    lower_raw, upper_raw = raw_value
+                    lower = coerce_value(lower_raw, col.data_type) if lower_raw is not None else None
+                    upper = coerce_value(upper_raw, col.data_type) if upper_raw is not None else None
+                    if left is None or lower is None or upper is None or left < lower or left > upper:
+                        group_matches = False
+                        break
+                    continue
+
                 right = coerce_value(raw_value, col.data_type) if raw_value is not None else None
                 if not self._compare(left, op, right):
                     group_matches = False
@@ -1815,6 +1890,15 @@ class Executor:
                         break
                     pattern = "^" + re.escape(raw_value).replace(r"%", ".*").replace(r"_", ".") + "$"
                     if re.match(pattern, str(left)) is None:
+                        group_matches = False
+                        break
+                    continue
+                if op == "BETWEEN":
+                    if left is None or not isinstance(raw_value, tuple) or len(raw_value) != 2:
+                        group_matches = False
+                        break
+                    lower, upper = raw_value
+                    if lower is None or upper is None or left < lower or left > upper:
                         group_matches = False
                         break
                     continue

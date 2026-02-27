@@ -4,6 +4,7 @@ import bisect
 import json
 import struct
 from dataclasses import dataclass
+from json import JSONDecodeError
 from typing import Any, Dict, List, Optional, Tuple
 
 from tinydb_engine.storage.pager import PAGE_SIZE, Pager
@@ -240,7 +241,20 @@ class BTreeIndex:
     def _read_node(self, page_id: int) -> Node:
         raw = self.pager.read_page(page_id)
         (size,) = struct.unpack("<I", raw[:4])
-        payload = json.loads(raw[4 : 4 + size].decode("utf-8")) if size else {}
+        if size < 0 or size > PAGE_SIZE - 4:
+            raise ValueError(f"Corrupt B-tree node at page {page_id}: invalid payload size {size}")
+        if size == 0:
+            payload = {}
+        else:
+            payload_bytes = raw[4 : 4 + size]
+            if len(payload_bytes) != size:
+                raise ValueError(
+                    f"Corrupt B-tree node at page {page_id}: truncated payload ({len(payload_bytes)} < {size})"
+                )
+            try:
+                payload = json.loads(payload_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, JSONDecodeError) as exc:
+                raise ValueError(f"Corrupt B-tree node at page {page_id}: invalid JSON payload") from exc
         keys = [self._normalize_key(item) for item in payload.get("keys", [])]
         values: List[Any] = []
         for item in payload.get("values", []):
